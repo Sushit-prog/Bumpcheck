@@ -21,5 +21,8 @@ htmlcov/
 .uv/
 uv.toml
 
+realworld/data/
+realworld/report.*
+
 .DS_Store
 Thumbs.db

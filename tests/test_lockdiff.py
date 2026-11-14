@@ -104,6 +104,7 @@ def test_root_project_change_is_skipped() -> None:
     result = parse_lock_pair(old, new, "uv.lock")
     assert result.bumps == []
     assert any("bumpcheck" in warning for warning in result.warnings)
+    assert any("an 'editable'" in warning for warning in result.warnings)
 
 
 def test_equivalent_versions_are_not_a_bump() -> None:

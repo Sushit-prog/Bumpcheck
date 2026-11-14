@@ -92,8 +92,10 @@ def _extract_toml(text: str, kind: str) -> _Extracted:
                     None,
                 )
                 if project_key is not None:
+                    article = "an" if project_key[:1].lower() in "aeiou" else "a"
                     warnings.append(
-                        f"Skipping project package '{name}' with a {project_key!r} source in {kind}"
+                        f"Skipping project package '{name}' with {article} {project_key!r} "
+                        f"source in {kind}"
                     )
                     continue
 
