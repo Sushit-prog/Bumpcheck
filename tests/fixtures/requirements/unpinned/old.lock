@@ -1,0 +1,8 @@
+# A requirements file with things BumpCheck cannot pin down
+click==8.1.7
+flask>=3.0
+name @ https://example.com/name-1.0.whl
+wildcard==1.*
+-r other.txt
+-e .
+--index-url https://pypi.org/simple

@@ -1,0 +1,2 @@
+requests[socks,security]==2.32.0 ; python_version >= "3.11"
+click==8.1.7

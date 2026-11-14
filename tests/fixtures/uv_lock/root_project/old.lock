@@ -1,0 +1,13 @@
+version = 1
+revision = 1
+requires-python = ">=3.11"
+
+[[package]]
+name = "bumpcheck"
+version = "0.1.0"
+source = { editable = "." }
+
+[[package]]
+name = "packaging"
+version = "24.0"
+source = { registry = "https://pypi.org/simple" }
