@@ -8,6 +8,7 @@ authors = [
 ]
 requires-python = ">=3.11"
 dependencies = [
+    "griffe>=2.4.1",
     "packaging",
     "pydantic>=2",
     "typer",

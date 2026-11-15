@@ -6,8 +6,10 @@ from enum import Enum
 from pathlib import Path
 
 import typer
+from packaging.version import InvalidVersion, Version
 
 from bumpcheck import __version__
+from bumpcheck.apidiff import diff_versions
 from bumpcheck.lockdiff import LockParseError, parse_lock_pair
 
 
@@ -73,4 +75,30 @@ def parse(
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=2) from exc
 
+    typer.echo(result.model_dump_json(indent=2))
+
+
+@app.command()
+def diff(
+    package: str = typer.Argument(..., help="The distribution name on PyPI."),
+    old: str = typer.Argument(..., help="The version before the bump."),
+    new: str = typer.Argument(..., help="The version after the bump."),
+    cache_dir: Path | None = typer.Option(
+        None,
+        "--cache-dir",
+        help="Directory used to cache downloaded wheels.",
+    ),
+) -> None:
+    """Compare the public API of two versions of a package as JSON."""
+    if not package.strip():
+        typer.echo("Package name must not be empty", err=True)
+        raise typer.Exit(code=2)
+    for label, value in (("old", old), ("new", new)):
+        try:
+            Version(value)
+        except InvalidVersion as exc:
+            typer.echo(f"Invalid {label} version: {value!r}", err=True)
+            raise typer.Exit(code=2) from exc
+
+    result = diff_versions(package, old, new, cache_dir=cache_dir)
     typer.echo(result.model_dump_json(indent=2))
