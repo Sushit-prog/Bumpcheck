@@ -54,6 +54,18 @@ realworld = _load_module()
             "build(deps): bump requests from 2.31.0 to 2.32.0 in /services/api",
             ("requests", "2.31.0", "2.32.0", "/services/api"),
         ),
+        (
+            "bump idna from 3.11 to 3.15 in the uv group across 1 directory",
+            ("idna", "3.11", "3.15", None),
+        ),
+        (
+            "Bump requests from 2.31.0 to 2.32.0 in the pip group across 1 directory",
+            ("requests", "2.31.0", "2.32.0", None),
+        ),
+        (
+            "Bump foo from 1.0 to 2.0 in the bar group across 2 directories",
+            ("foo", "1.0", "2.0", None),
+        ),
     ],
 )
 def test_parse_dependabot_title_matches(title: str, expected: tuple) -> None:
@@ -66,7 +78,8 @@ def test_parse_dependabot_title_matches(title: str, expected: tuple) -> None:
     "title",
     [
         "Update requests",
-        "Bump requests from 2.31.0 to 2.32.0 in the pip group across 1 directory",
+        "Bump the pip group across 1 directory with 3 updates",
+        "Bump the pip group with 3 updates",
         "Bump requests from 2.31.0 to 2.32.0 and 2.33.0",
         "updates: bump requests from 2.31.0 to 2.32.0",
         "Bump requests from 2.31.0",
@@ -388,3 +401,69 @@ def test_report_prefers_meta_over_stale_error_json(monkeypatch, tmp_path: Path) 
     assert data["summary"]["prs"] == 1
     assert data["summary"]["fetch_errors"] == 0
     assert data["fetch_errors"] == []
+
+
+def test_fetch_stores_exact_bytes_without_newline_translation(monkeypatch, tmp_path: Path) -> None:
+    data_dir = _setup(monkeypatch, tmp_path)
+    crlf = b"packaging==25.0\r\nflask==3.0\r\n"
+    _install_http(
+        monkeypatch,
+        {
+            PR_API: _pr_payload(),
+            FILES_API: _json_bytes([{"filename": "requirements.txt", "status": "modified"}]),
+            f"{RAW}/owner/repo/{BASE_SHA}/requirements.txt": crlf,
+            f"{RAW}/owner/repo/{HEAD_SHA}/requirements.txt": crlf,
+        },
+    )
+
+    assert realworld.fetch(force=False, verbose=False) == 0
+
+    pr_dir = data_dir / "owner__repo__1"
+    assert (pr_dir / "0.old").read_bytes() == crlf
+    assert (pr_dir / "0.new").read_bytes() == crlf
+
+
+def test_report_counts_files_with_unresolved(monkeypatch, tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    pr_dir = data_dir / "owner__repo__1"
+    pr_dir.mkdir(parents=True)
+    old = (
+        b"version = 1\n\n[[package]]\n"
+        b'name = "foo"\nversion = "1.0"\n\n[[package]]\n'
+        b'name = "foo"\nversion = "2.0"\n'
+    )
+    new = (
+        b"version = 1\n\n[[package]]\n"
+        b'name = "foo"\nversion = "1.1"\n\n[[package]]\n'
+        b'name = "foo"\nversion = "2.0"\n'
+    )
+    (pr_dir / "0.old").write_bytes(old)
+    (pr_dir / "0.new").write_bytes(new)
+    meta = {
+        "url": PR_URL,
+        "owner": "owner",
+        "repo": "repo",
+        "number": 1,
+        "title": "Bump foo from 1.0 to 2.0",
+        "base_sha": BASE_SHA,
+        "head_sha": HEAD_SHA,
+        "files": [
+            {
+                "index": 0,
+                "path": "uv.lock",
+                "old_path": "uv.lock",
+                "new_path": "uv.lock",
+                "kind": "uv.lock",
+            }
+        ],
+        "notes": [],
+    }
+    (pr_dir / "meta.json").write_text(json.dumps(meta) + "\n", encoding="utf-8")
+    monkeypatch.setattr(realworld, "DATA_DIR", data_dir)
+
+    data = realworld.build_report()
+
+    assert data["summary"]["files_with_unresolved"] == 1
+    assert data["prs"][0]["files"][0]["unresolved"] == [
+        {"package": "foo", "removed": ["1.0"], "added": ["1.1"]}
+    ]

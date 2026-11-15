@@ -71,6 +71,10 @@ def bump_tuples(result: object) -> list[tuple[str, str | None, str | None]]:
     return [(bump.package, bump.old_version, bump.new_version) for bump in result.bumps]
 
 
+def unresolved_tuples(result: object) -> list[tuple[str, list[str], list[str]]]:
+    return [(item.package, item.removed, item.added) for item in result.unresolved]
+
+
 @pytest.mark.parametrize(("kind_dir", "scenario", "expected"), CASES)
 def test_fixture_bumps(kind_dir: str, scenario: str, expected: list) -> None:
     old, new = fixture_pair(kind_dir, scenario)
@@ -92,11 +96,77 @@ def test_no_version_package_is_ignored_with_warning() -> None:
     assert any("mystery" in warning for warning in result.warnings)
 
 
-def test_duplicate_versions_are_skipped_with_warning() -> None:
-    old, new = fixture_pair("poetry_lock", "duplicate_versions")
-    result = parse_lock_pair(old, new, "poetry.lock")
+@pytest.mark.parametrize("kind_dir", ["uv_lock", "poetry_lock", "requirements"])
+def test_forked_unchanged_has_no_bumps_unresolved_or_warnings(kind_dir: str) -> None:
+    old, new = fixture_pair(kind_dir, "forked_unchanged")
+    result = parse_lock_pair(old, new, KIND_BY_DIR[kind_dir])
     assert result.bumps == []
+    assert result.unresolved == []
+    assert result.warnings == []
+
+
+@pytest.mark.parametrize("kind_dir", ["uv_lock", "poetry_lock", "requirements"])
+def test_forked_one_side_changes_is_unresolved_not_a_bump(kind_dir: str) -> None:
+    old, new = fixture_pair(kind_dir, "forked_one_side_changes")
+    result = parse_lock_pair(old, new, KIND_BY_DIR[kind_dir])
+    assert result.bumps == []
+    assert unresolved_tuples(result) == [("foo", ["1.0"], ["1.1"])]
     assert any("foo" in warning for warning in result.warnings)
+
+
+@pytest.mark.parametrize("kind_dir", ["uv_lock", "requirements"])
+def test_single_to_forked_is_unresolved(kind_dir: str) -> None:
+    old, new = fixture_pair(kind_dir, "single_to_forked")
+    result = parse_lock_pair(old, new, KIND_BY_DIR[kind_dir])
+    assert result.bumps == []
+    assert unresolved_tuples(result) == [("foo", ["1.0"], ["1.1", "2.0"])]
+    assert any("foo" in warning for warning in result.warnings)
+
+
+@pytest.mark.parametrize("kind_dir", ["uv_lock", "requirements"])
+def test_forked_package_added_on_one_side_is_unresolved(kind_dir: str) -> None:
+    old, new = fixture_pair(kind_dir, "forked_added")
+    result = parse_lock_pair(old, new, KIND_BY_DIR[kind_dir])
+    assert result.bumps == []
+    assert unresolved_tuples(result) == [("foo", [], ["1.0", "2.0"])]
+
+
+@pytest.mark.parametrize("kind_dir", ["uv_lock", "requirements"])
+def test_forked_package_removed_on_one_side_is_unresolved(kind_dir: str) -> None:
+    old, new = fixture_pair(kind_dir, "forked_removed")
+    result = parse_lock_pair(old, new, KIND_BY_DIR[kind_dir])
+    assert result.bumps == []
+    assert unresolved_tuples(result) == [("foo", ["1.0", "2.0"], [])]
+
+
+def test_requirements_marker_split_unchanged_is_ignored() -> None:
+    old, new = fixture_pair("requirements", "marker_split")
+    result = parse_lock_pair(old, new, "requirements")
+    assert result.bumps == []
+    assert result.unresolved == []
+    assert result.warnings == []
+
+
+def test_single_version_add_and_remove_stay_normal_bumps() -> None:
+    old, new = fixture_pair("uv_lock", "added_removed")
+    result = parse_lock_pair(old, new, "uv.lock")
+    assert bump_tuples(result) == [("httpx", None, "0.27.2"), ("requests", "2.31.0", None)]
+    assert result.unresolved == []
+
+
+def test_unresolved_is_sorted_by_package() -> None:
+    def uv(*entries: tuple[str, str]) -> str:
+        blocks = "".join(
+            f'\n[[package]]\nname = "{name}"\nversion = "{version}"\n'
+            'source = { registry = "https://pypi.org/simple" }\n'
+            for name, version in entries
+        )
+        return f'version = 1\nrevision = 1\nrequires-python = ">=3.11"\n{blocks}'
+
+    old = uv(("zeta", "1.0"), ("zeta", "2.0"), ("alpha", "1.0"), ("alpha", "2.0"))
+    new = uv(("zeta", "1.1"), ("zeta", "2.0"), ("alpha", "1.1"), ("alpha", "2.0"))
+    result = parse_lock_pair(old, new, "uv.lock")
+    assert [item.package for item in result.unresolved] == ["alpha", "zeta"]
 
 
 def test_root_project_change_is_skipped() -> None:

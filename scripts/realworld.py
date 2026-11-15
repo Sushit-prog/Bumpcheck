@@ -42,6 +42,7 @@ TOP_EXTRA_BUMPS = 10
 _TITLE_RE = re.compile(
     r"^(?:(?P<prefix>[A-Za-z]+)\(deps[^)]*\):?\s+)?"
     r"[Bb]ump\s+(?P<name>\S+)\s+from\s+(?P<old>\S+)\s+to\s+(?P<new>\S+)"
+    r"(?:\s+in\s+the\s+(?P<group>\S+)\s+group\s+across\s+\d+\s+director(?:y|ies))?"
     r"(?:\s+in\s+(?P<path>\S+))?\s*$"
 )
 
@@ -139,10 +140,10 @@ def _get_json(url: str, token: str | None) -> object:
     return json.loads(_get(url, token).decode("utf-8"))
 
 
-def _download(repo_full_name: str, path: str, sha: str, token: str | None) -> str:
+def _download(repo_full_name: str, path: str, sha: str, token: str | None) -> bytes:
     owner, _, repo = repo_full_name.partition("/")
     encoded = urllib.parse.quote(path, safe="/")
-    return _get(f"{RAW_ROOT}/{owner}/{repo}/{sha}/{encoded}", token).decode("utf-8")
+    return _get(f"{RAW_ROOT}/{owner}/{repo}/{sha}/{encoded}", token)
 
 
 def _read_pr_urls() -> list[str]:
@@ -179,15 +180,15 @@ def _fetch_side(
     sha: str,
     kind: str,
     token: str | None,
-) -> tuple[str | None, str | None]:
-    """Return (text, note); text is None when the side must be skipped."""
+) -> tuple[bytes | None, str | None]:
+    """Return (content, note); content is None when the side must be skipped."""
     try:
         return _download(repo_full_name, path, sha, token), None
     except urllib.error.HTTPError as exc:
         if exc.code != 404:
             return None, f"HTTP {exc.code} fetching {path}"
         if kind == "requirements":
-            return "", None
+            return b"", None
         return None, f"{path} missing on one side (skipped for {kind})"
 
 
@@ -246,15 +247,15 @@ def _fetch_one(url: str, token: str | None, force: bool, verbose: bool = False) 
             else:
                 old_path = new_path
 
-            old_text, old_note = _fetch_side(base_repo, old_path, base_sha, kind, token)
-            new_text, new_note = _fetch_side(head_repo, new_path, head_sha, kind, token)
+            old_bytes, old_note = _fetch_side(base_repo, old_path, base_sha, kind, token)
+            new_bytes, new_note = _fetch_side(head_repo, new_path, head_sha, kind, token)
             note = old_note or new_note
-            if old_text is None or new_text is None or note is not None:
+            if old_bytes is None or new_bytes is None or note is not None:
                 meta["notes"].append(f"{new_path}: {note or 'skipped'}")
                 continue
 
-            (pr_dir / f"{index}.old").write_text(old_text, encoding="utf-8")
-            (pr_dir / f"{index}.new").write_text(new_text, encoding="utf-8")
+            (pr_dir / f"{index}.old").write_bytes(old_bytes)
+            (pr_dir / f"{index}.new").write_bytes(new_bytes)
             meta["files"].append(
                 {
                     "index": index,
@@ -333,8 +334,8 @@ def _load_fetch_errors() -> list[dict]:
 
 def _analyse_file(pr_dir: Path, entry: dict) -> dict:
     kind = entry["kind"]
-    old_text = (pr_dir / f"{entry['index']}.old").read_text(encoding="utf-8")
-    new_text = (pr_dir / f"{entry['index']}.new").read_text(encoding="utf-8")
+    old_text = (pr_dir / f"{entry['index']}.old").read_bytes().decode("utf-8-sig")
+    new_text = (pr_dir / f"{entry['index']}.new").read_bytes().decode("utf-8-sig")
     try:
         result = parse_lock_pair(old_text, new_text, kind)
     except LockParseError as exc:
@@ -344,6 +345,7 @@ def _analyse_file(pr_dir: Path, entry: dict) -> dict:
             "message": str(exc),
             "bumps": [],
             "warnings": [],
+            "unresolved": [],
         }
     except Exception as exc:  # noqa: BLE001 - report unexpected failures
         return {
@@ -352,6 +354,7 @@ def _analyse_file(pr_dir: Path, entry: dict) -> dict:
             "message": str(exc),
             "bumps": [],
             "warnings": [],
+            "unresolved": [],
         }
     return {
         "status": "ok",
@@ -359,6 +362,7 @@ def _analyse_file(pr_dir: Path, entry: dict) -> dict:
         "message": None,
         "bumps": [bump.model_dump() for bump in result.bumps],
         "warnings": list(result.warnings),
+        "unresolved": [item.model_dump() for item in result.unresolved],
     }
 
 
@@ -387,6 +391,7 @@ def build_report() -> dict:
         "lock_parse_errors": 0,
         "unexpected_exceptions": 0,
         "files_with_warnings": 0,
+        "files_with_unresolved": 0,
         "fetch_errors": 0,
     }
     prs: list[dict] = []
@@ -408,6 +413,8 @@ def build_report() -> dict:
                 summary["unexpected_exceptions"] += 1
             if report["warnings"]:
                 summary["files_with_warnings"] += 1
+            if report["unresolved"]:
+                summary["files_with_unresolved"] += 1
             file_reports.append(report)
 
         status, extra_bumps = _cross_check(meta.get("title", ""), file_reports)
@@ -504,7 +511,8 @@ def _render_markdown(report: dict) -> str:
             lines.append(
                 f"- file {file_report['path']} ({file_report['kind']}): "
                 f"{file_report['status']}, {len(file_report['bumps'])} bump(s), "
-                f"{len(file_report['warnings'])} warning(s)"
+                f"{len(file_report['warnings'])} warning(s), "
+                f"{len(file_report['unresolved'])} unresolved"
             )
             if file_report["message"]:
                 lines.append(f"  - {file_report['exception']}: {file_report['message']}")

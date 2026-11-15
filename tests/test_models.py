@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from bumpcheck.models import Bump, ParseResult
+from bumpcheck.models import Bump, ParseResult, Unresolved
 
 
 def test_package_name_is_canonicalized() -> None:
@@ -56,3 +56,31 @@ def test_parse_result_holds_bumps_and_warnings() -> None:
     result = ParseResult(bumps=[], warnings=["heads up"])
     assert result.bumps == []
     assert result.warnings == ["heads up"]
+
+
+def test_parse_result_unresolved_defaults_to_empty() -> None:
+    result = ParseResult(bumps=[], warnings=[])
+    assert result.unresolved == []
+
+
+def test_unresolved_canonicalizes_package() -> None:
+    item = Unresolved(package="My_Package", removed=["1.0"], added=["2.0"])
+    assert item.package == "my-package"
+
+
+def test_unresolved_sorts_versions_by_parsed_version() -> None:
+    item = Unresolved(package="foo", removed=["2.0", "1.0", "1.10"], added=["2.0", "1.0"])
+    assert item.removed == ["1.0", "1.10", "2.0"]
+    assert item.added == ["1.0", "2.0"]
+
+
+def test_parse_result_sorts_unresolved_by_package() -> None:
+    result = ParseResult(
+        bumps=[],
+        warnings=[],
+        unresolved=[
+            Unresolved(package="zeta", removed=["1.0"], added=["1.1"]),
+            Unresolved(package="alpha", removed=["1.0"], added=["1.1"]),
+        ],
+    )
+    assert [item.package for item in result.unresolved] == ["alpha", "zeta"]

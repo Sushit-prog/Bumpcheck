@@ -38,6 +38,22 @@ def test_cli_parse_success(tmp_path: Path) -> None:
     assert payload["warnings"] == []
 
 
+def test_cli_parse_includes_unresolved(tmp_path: Path) -> None:
+    old = write_lock(
+        tmp_path / "old.lock", fixture_text("uv_lock", "forked_one_side_changes", "old.lock")
+    )
+    new = write_lock(
+        tmp_path / "new.lock", fixture_text("uv_lock", "forked_one_side_changes", "new.lock")
+    )
+
+    result = CliRunner().invoke(app, ["parse", str(old), str(new), "--kind", "uv.lock"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["bumps"] == []
+    assert payload["unresolved"] == [{"package": "foo", "removed": ["1.0"], "added": ["1.1"]}]
+
+
 def test_cli_parse_requirements(tmp_path: Path) -> None:
     old = write_lock(
         tmp_path / "old.txt", fixture_text("requirements", "extras_markers", "old.lock")

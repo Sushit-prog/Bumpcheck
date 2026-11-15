@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from packaging.utils import canonicalize_name
 from packaging.version import InvalidVersion, Version
 
-from bumpcheck.models import Bump, ParseResult
+from bumpcheck.models import Bump, ParseResult, Unresolved
 
 SUPPORTED_KINDS = ("uv.lock", "poetry.lock", "requirements")
 
@@ -31,9 +31,8 @@ class LockParseError(Exception):
 
 @dataclass(frozen=True)
 class _Extracted:
-    versions: dict[str, str] = field(default_factory=dict)
+    versions: dict[str, list[str]] = field(default_factory=dict)
     ignored: set[str] = field(default_factory=set)
-    ambiguous: set[str] = field(default_factory=set)
     warnings: list[str] = field(default_factory=list)
 
 
@@ -44,18 +43,20 @@ def _normalize_text(text: str) -> str:
 
 
 def _add_version(
-    versions_by_name: dict[str, set[str]],
+    versions_by_name: dict[str, list[str]],
     warnings: list[str],
     name: str,
     version: str,
     kind: str,
 ) -> None:
     try:
-        Version(version)
+        parsed = Version(version)
     except InvalidVersion:
         warnings.append(f"Package '{name}' has invalid version {version!r} in {kind}; ignoring it")
         return
-    versions_by_name.setdefault(name, set()).add(version)
+    existing = versions_by_name.setdefault(name, [])
+    if all(Version(known) != parsed for known in existing):
+        existing.append(version)
 
 
 def _extract_toml(text: str, kind: str) -> _Extracted:
@@ -71,7 +72,7 @@ def _extract_toml(text: str, kind: str) -> _Extracted:
     if not isinstance(packages, list):
         raise LockParseError(f"Invalid {kind}: the 'package' key must be an array of tables")
 
-    versions_by_name: dict[str, set[str]] = {}
+    versions_by_name: dict[str, list[str]] = {}
     ignored: set[str] = set()
     warnings: list[str] = []
 
@@ -114,16 +115,8 @@ def _extract_toml(text: str, kind: str) -> _Extracted:
         if len(warnings) > before:
             ignored.add(name)
 
-    ambiguous = {name for name, values in versions_by_name.items() if len(values) > 1}
-    for name in sorted(ambiguous):
-        warnings.append(f"Package '{name}' has multiple versions in {kind}; skipping it")
-
-    versions = {
-        name: next(iter(values))
-        for name, values in versions_by_name.items()
-        if name not in ambiguous and name not in ignored
-    }
-    return _Extracted(versions=versions, ignored=ignored, ambiguous=ambiguous, warnings=warnings)
+    versions = {name: values for name, values in versions_by_name.items() if name not in ignored}
+    return _Extracted(versions=versions, ignored=ignored, warnings=warnings)
 
 
 def _logical_lines(text: str) -> list[str]:
@@ -145,7 +138,7 @@ def _logical_lines(text: str) -> list[str]:
 
 
 def _extract_requirements(text: str, kind: str) -> _Extracted:
-    versions_by_name: dict[str, set[str]] = {}
+    versions_by_name: dict[str, list[str]] = {}
     ignored: set[str] = set()
     warnings: list[str] = []
 
@@ -177,16 +170,8 @@ def _extract_requirements(text: str, kind: str) -> _Extracted:
         if len(warnings) > before:
             ignored.add(name)
 
-    ambiguous = {name for name, values in versions_by_name.items() if len(values) > 1}
-    for name in sorted(ambiguous):
-        warnings.append(f"Package '{name}' has multiple versions in {kind}; skipping it")
-
-    versions = {
-        name: next(iter(values))
-        for name, values in versions_by_name.items()
-        if name not in ambiguous and name not in ignored
-    }
-    return _Extracted(versions=versions, ignored=ignored, ambiguous=ambiguous, warnings=warnings)
+    versions = {name: values for name, values in versions_by_name.items() if name not in ignored}
+    return _Extracted(versions=versions, ignored=ignored, warnings=warnings)
 
 
 _EXTRACTORS = {
@@ -207,14 +192,29 @@ def parse_lock_pair(old_text: str, new_text: str, kind: str) -> ParseResult:
     new = extractor(_normalize_text(new_text), kind)
 
     ignored = old.ignored | new.ignored
-    ambiguous = old.ambiguous | new.ambiguous
 
     bumps: list[Bump] = []
+    unresolved: list[Unresolved] = []
     for name in sorted(set(old.versions) | set(new.versions)):
-        if name in ignored or name in ambiguous:
+        if name in ignored:
             continue
-        old_version = old.versions.get(name)
-        new_version = new.versions.get(name)
+        old_raw = old.versions.get(name, [])
+        new_raw = new.versions.get(name, [])
+        old_versions = {Version(value) for value in old_raw}
+        new_versions = {Version(value) for value in new_raw}
+        if len(old_versions) > 1 or len(new_versions) > 1:
+            if old_versions == new_versions:
+                continue
+            unresolved.append(
+                Unresolved(
+                    package=name,
+                    removed=[value for value in old_raw if Version(value) not in new_versions],
+                    added=[value for value in new_raw if Version(value) not in old_versions],
+                )
+            )
+            continue
+        old_version = old_raw[0] if old_raw else None
+        new_version = new_raw[0] if new_raw else None
         if old_version is not None and new_version is not None:
             if Version(old_version) == Version(new_version):
                 continue
@@ -227,5 +227,9 @@ def parse_lock_pair(old_text: str, new_text: str, kind: str) -> ParseResult:
             )
         )
 
-    warnings = list(dict.fromkeys(old.warnings + new.warnings))
-    return ParseResult(bumps=bumps, warnings=warnings)
+    unresolved_warnings = [
+        f"Package '{item.package}' has multiple versions in {kind}; recording it as unresolved"
+        for item in unresolved
+    ]
+    warnings = list(dict.fromkeys(old.warnings + new.warnings + unresolved_warnings))
+    return ParseResult(bumps=bumps, warnings=warnings, unresolved=unresolved)
