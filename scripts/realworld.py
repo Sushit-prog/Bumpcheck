@@ -13,6 +13,7 @@ import json
 import os
 import re
 import time
+import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -190,7 +191,15 @@ def _fetch_side(
         return None, f"{path} missing on one side (skipped for {kind})"
 
 
-def _fetch_one(url: str, token: str | None, force: bool) -> str:
+def _format_exception(exc: BaseException) -> str:
+    """Format an exception as "<Type>: <message>", including OSError filenames."""
+    message = f"{type(exc).__name__}: {exc}"
+    if isinstance(exc, OSError) and exc.filename and str(exc.filename) not in str(exc):
+        message = f"{message}: {exc.filename}"
+    return message
+
+
+def _fetch_one(url: str, token: str | None, force: bool, verbose: bool = False) -> str:
     try:
         owner, repo, number = parse_pr_url(url)
     except ValueError as exc:
@@ -199,6 +208,8 @@ def _fetch_one(url: str, token: str | None, force: bool) -> str:
     pr_dir = DATA_DIR / f"{owner}__{repo}__{number}"
     if (pr_dir / "meta.json").exists() and not force:
         return f"skip {owner}/{repo}#{number}: already fetched"
+
+    pr_dir.mkdir(parents=True, exist_ok=True)
 
     try:
         pr = _get_json(f"{API_ROOT}/repos/{owner}/{repo}/pulls/{number}", token)
@@ -256,18 +267,21 @@ def _fetch_one(url: str, token: str | None, force: bool) -> str:
     except RateLimited:
         raise
     except Exception as exc:  # noqa: BLE001 - one bad PR must not stop the run
-        pr_dir.mkdir(parents=True, exist_ok=True)
+        if verbose:
+            traceback.print_exc()
         error = {
             "url": url,
             "owner": owner,
             "repo": repo,
             "number": number,
-            "error": f"{type(exc).__name__}: {exc}",
+            "error": _format_exception(exc),
         }
         (pr_dir / "error.json").write_text(json.dumps(error, indent=2) + "\n", encoding="utf-8")
-        return f"error {owner}/{repo}#{number}: {type(exc).__name__}"
+        return f"error {owner}/{repo}#{number}: {_format_exception(exc)}"
 
-    pr_dir.mkdir(parents=True, exist_ok=True)
+    stale_error = pr_dir / "error.json"
+    if stale_error.exists():
+        stale_error.unlink()
     (pr_dir / "meta.json").write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
     return f"fetched {owner}/{repo}#{number}: {len(meta['files'])} lockfile(s)"
 
@@ -282,7 +296,7 @@ def _print_rate_limit(exc: RateLimited) -> None:
     print("Rerun `fetch` later to resume; already-fetched PRs are skipped.")
 
 
-def fetch(force: bool) -> int:
+def fetch(force: bool, verbose: bool = False) -> int:
     token = os.environ.get("GITHUB_TOKEN")
     if not token:
         print("GITHUB_TOKEN is not set; using unauthenticated GitHub API (lower rate limits).")
@@ -290,7 +304,7 @@ def fetch(force: bool) -> int:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     for url in urls:
         try:
-            print(_fetch_one(url, token, force))
+            print(_fetch_one(url, token, force, verbose))
         except RateLimited as exc:
             _print_rate_limit(exc)
             return 3
@@ -518,10 +532,15 @@ def main(argv: list[str] | None = None) -> int:
     subparsers = parser.add_subparsers(dest="command", required=True)
     fetch_parser = subparsers.add_parser("fetch", help="download PR lockfiles")
     fetch_parser.add_argument("--force", action="store_true", help="refetch existing PRs")
+    fetch_parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="print the full traceback for each failed PR",
+    )
     subparsers.add_parser("report", help="build report.md and report.json from fetched data")
     args = parser.parse_args(argv)
     if args.command == "fetch":
-        return fetch(force=args.force)
+        return fetch(force=args.force, verbose=args.verbose)
     return report()
 
 
