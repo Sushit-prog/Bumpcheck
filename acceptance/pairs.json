@@ -1,0 +1,16 @@
+[
+  {
+    "package": "idna",
+    "old": "3.11",
+    "new": "3.15",
+    "expect": [
+      {
+        "symbol": "idna.core.valid_string_length",
+        "kind": "PARAMETER_REMOVED",
+        "parameter": "label"
+      }
+    ],
+    "note": "parameter renamed to domain",
+    "source": ""
+  }
+]

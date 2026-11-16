@@ -24,5 +24,7 @@ uv.toml
 realworld/data/
 realworld/report.*
 
+acceptance/report.*
+
 .DS_Store
 Thumbs.db
