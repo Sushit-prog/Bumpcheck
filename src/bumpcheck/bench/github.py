@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import http.client
 import json
 import os
 import random
+import ssl
 import sys
 import time
 import urllib.error
@@ -29,8 +31,17 @@ SEARCH_MIN_INTERVAL = 2.0
 MIN_REQUEST_INTERVAL = 1.0
 MAX_ATTEMPTS = 3
 MAX_RATE_LIMIT_RETRIES = 4
+MAX_NET_RETRIES = 4
 NOTICE_MIN_SLEEP = 5.0
 REQUEST_TIMEOUT = 30
+
+RETRYABLE_NETWORK_ERRORS = (
+    http.client.IncompleteRead,
+    urllib.error.URLError,
+    TimeoutError,
+    ConnectionResetError,
+    ssl.SSLError,
+)
 
 RATE_LIMIT_HEADERS = (
     "x-ratelimit-remaining",
@@ -232,9 +243,25 @@ class GitHubClient:
     def _send(self, url: str, headers: dict[str, str]) -> tuple[int, Mapping[str, str], bytes]:
         attempt = 0
         rate_limit_attempt = 0
+        net_attempt = 0
         while True:
             self._throttle(url)
-            status, response_headers, body = self._transport("GET", url, headers)
+            try:
+                status, response_headers, body = self._transport("GET", url, headers)
+            except urllib.error.HTTPError as exc:
+                body = exc.read() if exc.fp is not None else b""
+                status = exc.code
+                response_headers = dict(exc.headers.items()) if exc.headers else {}
+            except RETRYABLE_NETWORK_ERRORS as exc:
+                if net_attempt >= MAX_NET_RETRIES:
+                    path = urllib.parse.urlsplit(url).path
+                    raise GitHubError(
+                        f"Network error after {MAX_NET_RETRIES + 1} attempts for {path}: "
+                        f"{type(exc).__name__}: {exc}"
+                    ) from exc
+                self._sleep((2.0**net_attempt) + self._rng() * 0.5)
+                net_attempt += 1
+                continue
             self.api_calls += 1
             if status in {403, 429}:
                 rate = self._rate_limit_sleep(response_headers, body, rate_limit_attempt)

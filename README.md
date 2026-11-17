@@ -145,9 +145,26 @@ head commit. It writes three files to `--out`:
 - `excluded.jsonl`: every inspected PR that was rejected, with a reason:
   `group_bump`, `not_single_package`, `no_supported_lockfile`,
   `parse_mismatch`, `no_ci`, `ci_not_attributable`,
-  `closed_without_ci_signal`, or `other`.
+  `closed_without_ci_signal`, `noise_repo`, `repo_cap`, or `other`. Each
+  record keeps the PR title so rejections can be audited.
 - `summary.json`: counts per label suggestion, bot, split and exclusion
   reason, plus distinct repos and API calls made.
+
+Repos matching a built-in noise list (for example repo names starting with
+`skills-`, plus `secure-code-game`, `codeql`, `copilot-codespaces`, `opensafely`)
+are recorded as `noise_repo` from search results alone, and a repo that already
+contributed `--max-per-repo` candidates (default 3) is recorded as `repo_cap`.
+Both checks run before any PR request, so they cost no API budget. Passing one
+or more `--skip-repo-pattern` regexes (case-insensitive) replaces the built-in
+list. A pattern that starts with a literal `^` and contains no `/` is matched
+against the bare repo name, so `^skills-` skips `someuser/skills-introduction`
+but keeps `skills-org/real-project`; `^acme` likewise excludes `x/acme-tools`
+but not `acme/widget`. Every other pattern is matched against the full
+`owner/name`, so `opensafely` still hits the owner and `^acme/` targets an
+owner explicitly. Only a leading literal `^` counts: an inline-flag form such
+as `(?i)^skills-` is treated as unanchored and matched against `owner/name`.
+`--ci-status {any,failure,success}` adds GitHub's `status:` qualifier to the
+search and is copied into each candidate's `sampled_by` field.
 
 CI outcomes are noisy suggestions, not labels. `OK_SUSPECT` means every
 signal-bearing check passed on a merged PR, `BROKE_SUSPECT` means at least one
@@ -160,13 +177,23 @@ downgraded to `UNCLEAR`. Cancelled, skipped, neutral and
 stale conclusions are ignored; PRs with pending checks are excluded. Every
 candidate still needs hand verification.
 
+With `--logs`, each failing check yields a `failure_excerpts` entry whose
+`log_status` is `matched` (package-specific exception lines were found),
+`fetched_no_match`, or `unavailable` (no job id, missing token, or the log
+could not be fetched). For `BROKE_SUSPECT` merged PRs, `later_fix_commits`
+lists commits after the merge that touch the lockfile or mention the package;
+the PR's own merge commit, messages that merge this PR (`#<number>`), and
+commits dated at or before the merge/close time are filtered out.
+
 Responses are cached under `.bumpcheck-cache/github/` (override with
 `--cache-dir`), and `--offline` replays a warm cache without touching the
 network. `GITHUB_TOKEN` is optional but required for `--logs` and for usable
 rate limits; it is never written to the cache or to any output file. Requests are
-spaced at least 1 second apart (search at least 2), and rate-limit 403/429
-responses are retried with the API's own retry hint (or a doubling backoff, up
-to four retries) before failing with the API's message. Rerunning
+spaced at least 1 second apart (search at least 2), transient network errors
+are retried up to four times with jittered exponential backoff, and
+rate-limit 403/429 responses are retried with the API's own retry hint (or a
+doubling backoff, up to four retries) before failing with the API's message.
+Rerunning
 into the same `--out` skips cases that are already recorded; `--limit` counts
 those earlier candidates too. Each processed PR prints one progress line to
 stderr, and both JSONL files are rewritten atomically (temp file + replace)
@@ -175,9 +202,11 @@ after every case, so pressing Ctrl-C saves what has been mined, writes
 
 The `dev`/`test` split is assigned deterministically per repository
 (`sha256(repo)` first byte below 77 means `test`, about 30%), so reruns and
-resumed runs keep the same split and no PR leaks between splits. Discovery walks
-one-month windows in ascending order and processes each search page as it
-arrives, so `--limit` stops pagination early; a window is split in half whenever
+resumed runs keep the same split and no PR leaks between splits. Discovery
+builds one-month windows per bot (oldest first) and takes one PR from each
+window in round-robin order, so results spread across the whole date range
+instead of exhausting the oldest month first; each search page is still
+fetched lazily, so `--limit` stops early. A window is split in half whenever
 GitHub's 1000-result search cap is hit, and a single day with more than 1000
 matches is still truncated by GitHub and cannot be paged further.
 

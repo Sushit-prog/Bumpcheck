@@ -104,7 +104,9 @@ class FakeGitHub:
         self.statuses = config.pop("statuses", None)
         self.commits = config.pop("commits", None)
         self.log_text = config.pop("log_text", None)
+        self.log_error = config.pop("log_error", None)
         self.files = config.pop("files", None)
+        self.merge_commit_sha = config.pop("merge_commit_sha", None)
         self.old_text = config.pop("old_text", OLD_UV)
         self.new_text = config.pop("new_text", NEW_UV)
         self.calls: list[dict] = []
@@ -128,6 +130,7 @@ class FakeGitHub:
             "merged": self.merged,
             "merged_at": self.merged_at if self.merged else None,
             "closed_at": self.closed_at,
+            "merge_commit_sha": self.merge_commit_sha,
             "base": {"sha": BASE_SHA, "ref": "main", "repo": {"full_name": REPO_FULL}},
             "head": {"sha": HEAD_SHA, "repo": {"full_name": REPO_FULL}},
         }
@@ -188,6 +191,8 @@ class FakeGitHub:
         if path == f"{base}/commits":
             return _json(self._commits())
         if path == f"{base}/actions/jobs/9001/logs":
+            if self.log_error is not None:
+                return self.log_error, {}, b'{"message": "not found"}'  # type: ignore[return-value]
             return 302, {"Location": BLOB_URL}, b""
         if url == BLOB_URL:
             return 200, {"Content-Type": "text/plain"}, str(self.log_text or LOG_TEXT).encode()
@@ -246,6 +251,58 @@ class FakeMulti(FakeGitHub):
         return super().__call__(method, url, headers)
 
 
+class FakeRepo(FakeGitHub):
+    """Serves a configurable repo name so exclusion rules can be exercised."""
+
+    def __init__(self, repo: str, **config: object) -> None:
+        super().__init__(**config)
+        self.repo = repo
+
+    @property
+    def search_item(self) -> dict:
+        item = dict(super().search_item)
+        item["repository_url"] = f"{API}/repos/{self.repo}"
+        item["html_url"] = f"https://github.com/{self.repo}/pull/{PR_NUMBER}"
+        return item
+
+    def __call__(self, method: str, url: str, headers: dict) -> tuple:
+        parsed = urllib.parse.urlparse(url)
+        prefix = f"/repos/{self.repo}/"
+        if parsed.netloc == "api.github.com" and parsed.path.startswith(prefix):
+            url = url.replace(prefix, f"/repos/{REPO_FULL}/", 1)
+        return super().__call__(method, url, headers)
+
+
+class FakeSpread(FakeGitHub):
+    """Returns different PRs depending on the closed window being searched."""
+
+    def __init__(self, windows: dict[str, list[int]]) -> None:
+        super().__init__()
+        self.windows = windows
+
+    def __call__(self, method: str, url: str, headers: dict) -> tuple:
+        parsed = urllib.parse.urlparse(url)
+        if parsed.path == "/search/issues":
+            self.calls.append({"url": url, "headers": dict(headers)})
+            query = urllib.parse.parse_qs(parsed.query)["q"][0]
+            start = query.split("closed:")[1].split("..")[0]
+            items = []
+            for number in self.windows.get(start, []):
+                item = dict(self.search_item)
+                item["number"] = number
+                item["html_url"] = f"https://github.com/{REPO_FULL}/pull/{number}"
+                items.append(item)
+            return _json({"total_count": len(items), "items": items})
+        prefix = f"/repos/{REPO_FULL}/pulls/"
+        if parsed.path.startswith(prefix):
+            number_text, _, suffix = parsed.path[len(prefix) :].partition("/")
+            if number_text.isdigit() and not suffix:
+                return _json(self.pr_payload)
+            if number_text.isdigit():
+                return super().__call__(method, f"{API}{prefix}{PR_NUMBER}/{suffix}", headers)
+        return super().__call__(method, url, headers)
+
+
 def _mine_into(
     tmp_path: Path,
     fake: FakeGitHub,
@@ -254,6 +311,12 @@ def _mine_into(
     cache_name: str = "cache",
     logs: bool = False,
     limit: int = 10,
+    bot: str = "both",
+    since: date = date(2026, 1, 1),
+    until: date = date(2026, 2, 1),
+    max_per_repo: int = 3,
+    ci_status: str = "any",
+    skip_repo_patterns: list[str] | None = None,
 ) -> tuple[Path, int]:
     client = GitHubClient(
         token="test-token",
@@ -266,11 +329,15 @@ def _mine_into(
     out = tmp_path / out_name
     code = mine(
         out=out,
-        since=date(2026, 1, 1),
-        until=date(2026, 2, 1),
+        bot=bot,
+        since=since,
+        until=until,
         limit=limit,
         logs=logs,
         client=client,
+        max_per_repo=max_per_repo,
+        ci_status=ci_status,
+        skip_repo_patterns=skip_repo_patterns,
     )
     return out, code
 
@@ -283,9 +350,26 @@ def _run(
     cache_name: str = "cache",
     logs: bool = False,
     limit: int = 10,
+    bot: str = "both",
+    since: date = date(2026, 1, 1),
+    until: date = date(2026, 2, 1),
+    max_per_repo: int = 3,
+    ci_status: str = "any",
+    skip_repo_patterns: list[str] | None = None,
 ) -> Path:
     out, _ = _mine_into(
-        tmp_path, fake, out_name=out_name, cache_name=cache_name, logs=logs, limit=limit
+        tmp_path,
+        fake,
+        out_name=out_name,
+        cache_name=cache_name,
+        logs=logs,
+        limit=limit,
+        bot=bot,
+        since=since,
+        until=until,
+        max_per_repo=max_per_repo,
+        ci_status=ci_status,
+        skip_repo_patterns=skip_repo_patterns,
     )
     return out
 
@@ -459,7 +543,7 @@ def test_legacy_candidate_without_base_fields_loads(tmp_path: Path) -> None:
     legacy = {
         key: value
         for key, value in candidate.items()
-        if key not in {"base_ci_checks", "failure_vs_base"}
+        if key not in {"base_ci_checks", "failure_vs_base", "sampled_by"}
     }
     (out / "candidates.jsonl").write_text(json.dumps(legacy) + "\n", encoding="utf-8")
 
@@ -468,6 +552,7 @@ def test_legacy_candidate_without_base_fields_loads(tmp_path: Path) -> None:
     loaded = Candidate.model_validate(legacy)
     assert loaded.base_ci_checks == []
     assert loaded.failure_vs_base == []
+    assert loaded.sampled_by == "any"
 
     resumed_out, code = _mine_into(
         tmp_path, FakeGitHub(), out_name="out", cache_name="cache_legacy", limit=10
@@ -559,6 +644,7 @@ def test_logs_keep_only_package_exception_lines(tmp_path: Path) -> None:
                     "keyword argument 'verify'"
                 ),
             ],
+            "log_status": "matched",
         }
     ]
     blob_calls = [call for call in fake.calls if call["url"] == BLOB_URL]
@@ -812,3 +898,210 @@ def test_write_jsonl_keyboard_interrupt_keeps_previous_file(
 
     assert path.read_text(encoding="utf-8") == previous
     assert list(tmp_path.glob("*.tmp")) == []
+
+
+def test_search_url_can_filter_ci_status() -> None:
+    url = search_url("renovate", date(2026, 1, 1), date(2026, 2, 1), 1, "failure")
+    query = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)["q"][0]
+    assert query.endswith(" status:failure")
+
+
+def test_ci_status_is_recorded_and_sent(tmp_path: Path) -> None:
+    fake = FakeGitHub()
+    candidate, _ = _candidate(tmp_path, fake, ci_status="success")
+
+    assert candidate["sampled_by"] == "success"
+    queries = [
+        urllib.parse.parse_qs(urllib.parse.urlparse(call["url"]).query)["q"][0]
+        for call in fake.calls
+        if "/search/issues" in call["url"]
+    ]
+    assert queries
+    assert all(query.endswith(" status:success") for query in queries)
+
+
+def test_default_noise_repos_are_excluded_without_fetching_pr(tmp_path: Path) -> None:
+    fake = FakeRepo("opensafely/widgets")
+    excluded = _excluded(tmp_path, fake)
+
+    assert excluded["reason"] == "noise_repo"
+    assert not any("/pulls/" in call["url"] for call in fake.calls)
+
+
+def test_skip_patterns_replace_defaults(tmp_path: Path) -> None:
+    kept, _ = _candidate(
+        tmp_path,
+        FakeRepo("someuser/skills-introduction"),
+        skip_repo_patterns=[r"^acme/"],
+    )
+    assert kept["repo"] == "someuser/skills-introduction"
+
+    noised = _excluded(
+        tmp_path,
+        FakeRepo("acme/widgets"),
+        skip_repo_patterns=[r"^acme/"],
+        out_name="out2",
+        cache_name="cache2",
+    )
+    assert noised["reason"] == "noise_repo"
+
+
+def test_skills_prefixed_repo_name_is_noise_for_any_owner(tmp_path: Path) -> None:
+    excluded = _excluded(tmp_path, FakeRepo("acme/skills-tools"))
+    assert excluded["reason"] == "noise_repo"
+
+
+@pytest.mark.parametrize(
+    ("repo", "excluded"),
+    [
+        ("someuser/skills-introduction-to-codeql", True),
+        ("x/skills-secure-code-game", True),
+        ("x/Skills-secure-code-game", True),
+        ("skills-org/real-project", False),
+        ("pallets/flask", False),
+    ],
+)
+def test_default_skip_patterns_match_name_and_owner_name(repo: str, excluded: bool) -> None:
+    patterns = bench_mine._compile_skip_patterns(bench_mine.DEFAULT_SKIP_REPO_PATTERNS)
+
+    assert bench_mine._is_noise(repo, patterns) is excluded
+
+
+def test_skills_owner_with_real_project_is_not_noise(tmp_path: Path) -> None:
+    candidate, _ = _candidate(tmp_path, FakeRepo("skills-org/real-project"))
+    assert candidate["repo"] == "skills-org/real-project"
+
+
+def test_anchored_slashless_pattern_matches_repo_name_only() -> None:
+    patterns = bench_mine._compile_skip_patterns([r"^acme"])
+
+    assert bench_mine._is_noise("x/acme-tools", patterns) is True
+    assert bench_mine._is_noise("acme/widget", patterns) is False
+
+
+def test_inline_flag_pattern_is_unanchored() -> None:
+    patterns = bench_mine._compile_skip_patterns([r"(?i)^skills-"])
+
+    assert bench_mine._is_noise("skills-org/real-project", patterns) is True
+    assert bench_mine._is_noise("someuser/skills-introduction", patterns) is False
+
+
+def test_repo_cap_stops_after_default_three(tmp_path: Path) -> None:
+    titles = ["Bump requests from 2.31.0 to 2.32.0"] * 4
+    out, code = _mine_into(tmp_path, FakeMulti(titles))
+
+    assert code == 0
+    assert len(_read_jsonl(out / "candidates.jsonl")) == 3
+    assert [record["reason"] for record in _read_jsonl(out / "excluded.jsonl")] == ["repo_cap"]
+
+
+def test_repo_cap_counts_existing_candidates_on_resume(tmp_path: Path) -> None:
+    titles = ["Bump requests from 2.31.0 to 2.32.0"] * 2
+    first, _ = _mine_into(tmp_path, FakeMulti(titles), out_name="out", cache_name="cache", limit=1)
+    assert len(_read_jsonl(first / "candidates.jsonl")) == 1
+
+    fake = FakeMulti(titles)
+    _, code = _mine_into(tmp_path, fake, max_per_repo=1)
+
+    assert code == 0
+    assert len(_read_jsonl(first / "candidates.jsonl")) == 1
+    assert [record["reason"] for record in _read_jsonl(first / "excluded.jsonl")] == ["repo_cap"]
+    assert not any("/pulls/" in call["url"] for call in fake.calls)
+
+
+def test_max_per_repo_must_be_positive(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="--max-per-repo"):
+        _mine_into(tmp_path, FakeGitHub(), max_per_repo=0)
+
+
+def test_month_windows_are_round_robin(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    fake = FakeSpread(
+        {
+            "2026-01-01": [1, 2],
+            "2026-02-01": [11, 12],
+            "2026-03-01": [21],
+        }
+    )
+    out, code = _mine_into(
+        tmp_path,
+        fake,
+        bot="dependabot",
+        since=date(2026, 1, 1),
+        until=date(2026, 4, 1),
+        max_per_repo=10,
+    )
+
+    assert code == 0
+    order = [
+        line.split("] ", 1)[1].split(" -> ", 1)[0]
+        for line in capsys.readouterr().err.splitlines()
+        if " -> " in line
+    ]
+    assert order == [f"{REPO_FULL}#{number}" for number in (1, 11, 21, 2, 12)]
+    assert len(_read_jsonl(out / "candidates.jsonl")) == 5
+
+
+def _commit(sha: str, message: str, date: str) -> dict:
+    return {"sha": sha, "commit": {"message": message, "committer": {"date": date}}}
+
+
+def test_later_fixes_skip_merge_and_non_after_commits(tmp_path: Path) -> None:
+    commits = [
+        _commit("mergesha", "Fix requests import", "2026-01-06T00:00:00Z"),
+        _commit("mergepr", "Merge pull request #1 from dependabot/x", "2026-01-06T00:00:00Z"),
+        _commit("same", "Fix requests import", "2026-01-05T10:00:00Z"),
+        _commit("fix123", "Fix requests import", "2026-01-06T00:00:00Z"),
+    ]
+    fake = FakeGitHub(check_runs=[FAILURE_CHECK], commits=commits, merge_commit_sha="mergesha")
+    candidate, _ = _candidate(tmp_path, fake)
+
+    assert [fix["sha"] for fix in candidate["later_fix_commits"]] == ["fix123"]
+
+
+def test_log_status_unavailable_without_job_id(tmp_path: Path) -> None:
+    statuses = [{"context": "tests", "state": "failure", "target_url": "https://ci/tests"}]
+    candidate, _ = _candidate(tmp_path, FakeGitHub(check_runs=[], statuses=statuses), logs=True)
+
+    assert candidate["failure_excerpts"] == [
+        {"check_name": "tests", "lines": [], "log_status": "unavailable"}
+    ]
+
+
+def test_log_status_fetched_no_match(tmp_path: Path) -> None:
+    candidate, _ = _candidate(
+        tmp_path,
+        FakeGitHub(check_runs=[FAILURE_CHECK], log_text="all tests passed\n"),
+        logs=True,
+    )
+
+    assert candidate["failure_excerpts"] == [
+        {"check_name": "tests", "lines": [], "log_status": "fetched_no_match"}
+    ]
+
+
+def test_log_status_unavailable_on_fetch_error(tmp_path: Path) -> None:
+    candidate, _ = _candidate(
+        tmp_path,
+        FakeGitHub(check_runs=[FAILURE_CHECK], log_error=404),
+        logs=True,
+    )
+
+    assert candidate["failure_excerpts"] == [
+        {"check_name": "tests", "lines": [], "log_status": "unavailable"}
+    ]
+
+
+def test_excluded_records_keep_pr_title(tmp_path: Path) -> None:
+    title = "Bump the pip group across 1 directory with 3 updates"
+    excluded = _excluded(tmp_path, FakeGitHub(title=title))
+
+    assert excluded["title"] == title
+
+
+def test_legacy_excluded_without_title_loads() -> None:
+    from bumpcheck.bench.models import Excluded
+
+    excluded = Excluded.model_validate(
+        {"case_id": "a/b#1", "repo": "a/b", "pr_number": 1, "reason": "other"}
+    )
+    assert excluded.title == ""

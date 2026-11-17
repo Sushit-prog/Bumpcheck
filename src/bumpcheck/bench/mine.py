@@ -29,6 +29,7 @@ from bumpcheck.bench.models import (
     BaseComparisonStatus,
     Candidate,
     CheckRef,
+    CIStatus,
     Excluded,
     ExcludedReason,
     FailureExcerpt,
@@ -53,6 +54,14 @@ REPLACE_RETRY_SLEEP = 0.2
 MAX_LATER_FIXES = 5
 LATER_FIX_CALL_BUDGET = 2
 TEST_SPLIT_THRESHOLD = 77
+DEFAULT_MAX_PER_REPO = 3
+DEFAULT_SKIP_REPO_PATTERNS = [
+    r"^skills-",
+    "secure-code-game",
+    "codeql",
+    "copilot-codespaces",
+    "opensafely",
+]
 
 FAILURE_CONCLUSIONS = {
     "failure",
@@ -92,7 +101,7 @@ class _Check:
     job_id: int | None = None
 
 
-def search_url(bot: str, start: dt.date, end: dt.date, page: int) -> str:
+def search_url(bot: str, start: dt.date, end: dt.date, page: int, ci_status: str = "any") -> str:
     """Build a search URL for closed PRs by ``bot`` in ``[start, end)``."""
     inclusive_end = end - dt.timedelta(days=1)
     query = (
@@ -100,6 +109,8 @@ def search_url(bot: str, start: dt.date, end: dt.date, page: int) -> str:
         f"author:app/{bot} language:python "
         f"closed:{start.isoformat()}..{inclusive_end.isoformat()}"
     )
+    if ci_status in {"failure", "success"}:
+        query = f"{query} status:{ci_status}"
     params = urllib.parse.urlencode(
         {"q": query, "per_page": PAGE_SIZE, "page": page, "sort": "created", "order": "asc"}
     )
@@ -142,9 +153,14 @@ def _search_item(raw: object) -> SearchItem | None:
 
 
 def _fetch_search_page(
-    client: GitHubClient, bot: str, start: dt.date, end: dt.date, page: int
+    client: GitHubClient,
+    bot: str,
+    start: dt.date,
+    end: dt.date,
+    page: int,
+    ci_status: str = "any",
 ) -> tuple[int, list[SearchItem]]:
-    payload = client.get_json(search_url(bot, start, end, page))
+    payload = client.get_json(search_url(bot, start, end, page, ci_status))
     if not isinstance(payload, dict):
         raise GitHubError("Unexpected GitHub search response")
     total = payload.get("total_count")
@@ -156,23 +172,28 @@ def _fetch_search_page(
 
 
 def _iter_window(
-    client: GitHubClient, bot: str, start: dt.date, end: dt.date, depth: int = 0
+    client: GitHubClient,
+    bot: str,
+    start: dt.date,
+    end: dt.date,
+    depth: int = 0,
+    ci_status: str = "any",
 ) -> Iterator[SearchItem]:
     if start >= end:
         return
-    total, items = _fetch_search_page(client, bot, start, end, 1)
+    total, items = _fetch_search_page(client, bot, start, end, 1, ci_status)
     days = (end - start).days
     if total >= 1000 and days > 1 and depth < MAX_WINDOW_DEPTH:
         mid = start + dt.timedelta(days=days // 2)
-        yield from _iter_window(client, bot, start, mid, depth + 1)
-        yield from _iter_window(client, bot, mid, end, depth + 1)
+        yield from _iter_window(client, bot, start, mid, depth + 1, ci_status)
+        yield from _iter_window(client, bot, mid, end, depth + 1, ci_status)
         return
     items.sort(key=lambda item: (item.created_at, item.number))
     yield from items
     page = 1
     while len(items) >= PAGE_SIZE and page < MAX_CHECK_PAGES:
         page += 1
-        total, items = _fetch_search_page(client, bot, start, end, page)
+        total, items = _fetch_search_page(client, bot, start, end, page, ci_status)
         items.sort(key=lambda item: (item.created_at, item.number))
         yield from items
 
@@ -183,20 +204,30 @@ def _next_month(day: dt.date) -> dt.date:
     return dt.date(day.year, day.month + 1, 1)
 
 
-def _iter_months(
-    client: GitHubClient, bot: str, since: dt.date, until: dt.date
-) -> Iterator[SearchItem]:
+def _month_windows(since: dt.date, until: dt.date) -> list[tuple[dt.date, dt.date]]:
+    windows: list[tuple[dt.date, dt.date]] = []
     start = since
     while start < until:
         end = min(_next_month(start), until)
-        yield from _iter_window(client, bot, start, end)
+        windows.append((start, end))
         start = end
+    return windows
 
 
 def _iter_discoveries(
-    client: GitHubClient, bots: list[str], since: dt.date, until: dt.date
+    client: GitHubClient,
+    bots: list[str],
+    since: dt.date,
+    until: dt.date,
+    ci_status: str = "any",
 ) -> Iterator[SearchItem]:
-    generators = [_iter_months(client, bot, since, until) for bot in bots]
+    windows = {bot: _month_windows(since, until) for bot in bots}
+    generators = [
+        _iter_window(client, bot, *windows[bot][index], ci_status=ci_status)
+        for index in range(max((len(found) for found in windows.values()), default=0))
+        for bot in bots
+        if index < len(windows[bot])
+    ]
     active = list(generators)
     while active:
         for generator in list(active):
@@ -206,13 +237,34 @@ def _iter_discoveries(
                 active.remove(generator)
 
 
-def _excluded(item: SearchItem, reason: ExcludedReason) -> Excluded:
+def _excluded(item: SearchItem, reason: ExcludedReason, title: str | None = None) -> Excluded:
     return Excluded(
         case_id=f"{item.repo}#{item.number}",
         repo=item.repo,
         pr_number=item.number,
+        title=title or item.title,
         reason=reason,
     )
+
+
+def _compile_skip_patterns(patterns: list[str]) -> list[re.Pattern[str]]:
+    compiled: list[re.Pattern[str]] = []
+    for pattern in patterns:
+        try:
+            compiled.append(re.compile(pattern, re.IGNORECASE))
+        except re.error as exc:
+            raise ValueError(f"invalid --skip-repo-pattern {pattern!r}: {exc}") from exc
+    return compiled
+
+
+def _is_noise(repo: str, patterns: list[re.Pattern[str]]) -> bool:
+    _, sep, name = repo.partition("/")
+    repo_name = name if sep else repo
+    for pattern in patterns:
+        anchored_to_name = pattern.pattern.startswith("^") and "/" not in pattern.pattern
+        if pattern.search(repo_name if anchored_to_name else repo):
+            return True
+    return False
 
 
 def _split_for(repo: str) -> str:
@@ -421,11 +473,13 @@ def _collect_excerpts(
         if total_lines >= MAX_LOG_LINES_PER_CASE or total_bytes >= MAX_LOG_BYTES_PER_CASE:
             break
         if check.job_id is None:
+            excerpts.append(FailureExcerpt(check_name=check.name, log_status="unavailable"))
             continue
         url = f"{base_url}/actions/jobs/{check.job_id}/logs"
         try:
             text = client.get_log(url)
-        except HttpStatusError:
+        except GitHubError:
+            excerpts.append(FailureExcerpt(check_name=check.name, log_status="unavailable"))
             continue
         matched: list[str] = []
         for line in text.splitlines():
@@ -438,11 +492,12 @@ def _collect_excerpts(
             if len(matched) >= MAX_LOG_LINES_PER_CHECK:
                 break
         if not matched:
+            excerpts.append(FailureExcerpt(check_name=check.name, log_status="fetched_no_match"))
             continue
         size = sum(len(line.encode("utf-8")) + 1 for line in matched)
         if total_bytes + size > MAX_LOG_BYTES_PER_CASE:
             break
-        excerpts.append(FailureExcerpt(check_name=check.name, lines=matched))
+        excerpts.append(FailureExcerpt(check_name=check.name, lines=matched, log_status="matched"))
         total_lines += len(matched)
         total_bytes += size
     return excerpts
@@ -468,6 +523,29 @@ def _commit_from_payload(raw: object) -> LaterFix | None:
     return LaterFix(sha=sha, message=first_line[:200], date=date)
 
 
+def _parse_timestamp(value: str) -> dt.datetime | str:
+    try:
+        return dt.datetime.fromisoformat(value)
+    except ValueError:
+        return value
+
+
+def _is_merge_of(fix: LaterFix, pr_number: int) -> bool:
+    lowered = fix.message.lower()
+    return "merge" in lowered and bool(re.search(rf"#{pr_number}(?!\d)", lowered))
+
+
+def _not_after(fix_date: str, event_date: str) -> bool:
+    fix_value = _parse_timestamp(fix_date)
+    event_value = _parse_timestamp(event_date)
+    if isinstance(fix_value, dt.datetime) and isinstance(event_value, dt.datetime):
+        try:
+            return fix_value <= event_value
+        except TypeError:
+            pass
+    return str(fix_value) <= str(event_value)
+
+
 def _later_fixes(
     client: GitHubClient,
     base_url: str,
@@ -476,6 +554,8 @@ def _later_fixes(
     since: str,
     lockfile_path: str,
     package: str,
+    merge_commit_sha: str | None = None,
+    pr_number: int | None = None,
 ) -> list[LaterFix]:
     found: dict[str, LaterFix] = {}
     import_names = _import_names(package)
@@ -492,6 +572,12 @@ def _later_fixes(
             fix = _commit_from_payload(raw)
             if fix is None:
                 continue
+            if merge_commit_sha is not None and fix.sha == merge_commit_sha:
+                continue
+            if pr_number is not None and _is_merge_of(fix, pr_number):
+                continue
+            if _not_after(fix.date, since):
+                continue
             if calls > 1:
                 lowered = fix.message.lower()
                 if not any(name in lowered for name in import_names) and package not in lowered:
@@ -501,7 +587,9 @@ def _later_fixes(
     return ordered[:MAX_LATER_FIXES]
 
 
-def _mine_case(client: GitHubClient, item: SearchItem, *, logs: bool) -> Candidate | Excluded:
+def _mine_case(
+    client: GitHubClient, item: SearchItem, *, logs: bool, ci_status: CIStatus = "any"
+) -> Candidate | Excluded:
     owner, _, name = item.repo.partition("/")
     base_url = f"{github.API_ROOT}/repos/{owner}/{name}"
     bot = _bot_from_login(item.login)
@@ -519,7 +607,7 @@ def _mine_case(client: GitHubClient, item: SearchItem, *, logs: bool) -> Candida
     if title != item.title:
         title_result = classify_title(title, cast(Bot, bot))
         if title_result.parsed is None:
-            return _excluded(item, title_result.reason or "other")
+            return _excluded(item, title_result.reason or "other", title=title)
     parsed = title_result.parsed
 
     base = pr.get("base") if isinstance(pr.get("base"), dict) else {}
@@ -534,6 +622,7 @@ def _mine_case(client: GitHubClient, item: SearchItem, *, logs: bool) -> Candida
     merged = bool(pr.get("merged"))
     merged_at = _str_or_none(pr.get("merged_at"))
     closed_at = _str_or_none(pr.get("closed_at"))
+    merge_commit_sha = _str_or_none(pr.get("merge_commit_sha"))
 
     selected = [
         entry
@@ -631,6 +720,8 @@ def _mine_case(client: GitHubClient, item: SearchItem, *, logs: bool) -> Candida
             since=event_date,
             lockfile_path=lockfile_paths[0],
             package=package,
+            merge_commit_sha=merge_commit_sha,
+            pr_number=item.number,
         )
 
     return Candidate(
@@ -660,6 +751,7 @@ def _mine_case(client: GitHubClient, item: SearchItem, *, logs: bool) -> Candida
         later_fix_commits=later_fixes,
         split=_split_for(item.repo),
         rerun_flaky=flaky,
+        sampled_by=ci_status,
     )
 
 
@@ -680,9 +772,11 @@ def _compare_failures(failed: list[_Check], base_checks: list[CheckRef]) -> list
     return comparisons
 
 
-def _mine_safely(client: GitHubClient, item: SearchItem, *, logs: bool) -> Candidate | Excluded:
+def _mine_safely(
+    client: GitHubClient, item: SearchItem, *, logs: bool, ci_status: CIStatus = "any"
+) -> Candidate | Excluded:
     try:
-        return _mine_case(client, item, logs=logs)
+        return _mine_case(client, item, logs=logs, ci_status=ci_status)
     except HttpStatusError:
         return _excluded(item, "other")
 
@@ -778,17 +872,27 @@ def mine(
     offline: bool = False,
     cache_dir: Path | None = None,
     client: GitHubClient | None = None,
+    max_per_repo: int = DEFAULT_MAX_PER_REPO,
+    ci_status: str = "any",
+    skip_repo_patterns: list[str] | None = None,
 ) -> int:
     """Mine candidates into ``out``; returns a process exit code."""
     if bot not in {"dependabot", "renovate", "both"}:
         raise ValueError(f"Unknown bot choice: {bot!r}")
     if limit < 0:
         raise ValueError("--limit must be zero or greater")
+    if max_per_repo < 1:
+        raise ValueError("--max-per-repo must be one or greater")
+    if ci_status not in {"any", "failure", "success"}:
+        raise ValueError(f"Unknown --ci-status choice: {ci_status!r}")
 
     until_date = until or dt.date.today()
     since_date = since or (until_date - dt.timedelta(days=DEFAULT_SINCE_DAYS))
     if since_date >= until_date:
         raise ValueError("--since must be earlier than --until")
+    noise_patterns = _compile_skip_patterns(
+        DEFAULT_SKIP_REPO_PATTERNS if skip_repo_patterns is None else skip_repo_patterns
+    )
 
     active_client = client or GitHubClient(cache_dir=cache_dir, offline=offline)
     if logs and not active_client.token:
@@ -800,17 +904,30 @@ def mine(
     candidates = _load_records(candidates_path)
     excluded = _load_records(excluded_path)
     seen = set(candidates) | set(excluded)
+    repo_counts = Counter(str(record.get("repo", "")) for record in candidates.values())
 
     try:
         if len(candidates) < limit:
             bots = ["dependabot", "renovate"] if bot == "both" else [bot]
-            for item in _iter_discoveries(active_client, bots, since_date, until_date):
+            discoveries = _iter_discoveries(active_client, bots, since_date, until_date, ci_status)
+            for item in discoveries:
                 case_id = f"{item.repo}#{item.number}"
                 if case_id in seen:
                     continue
-                result = _mine_safely(active_client, item, logs=logs)
+                if _is_noise(item.repo, noise_patterns):
+                    result: Candidate | Excluded = _excluded(item, "noise_repo")
+                elif repo_counts[item.repo] >= max_per_repo:
+                    result = _excluded(item, "repo_cap")
+                else:
+                    result = _mine_safely(
+                        active_client,
+                        item,
+                        logs=logs,
+                        ci_status=cast(CIStatus, ci_status),
+                    )
                 if isinstance(result, Candidate):
                     candidates[case_id] = result.model_dump()
+                    repo_counts[item.repo] += 1
                     outcome = f"kept ({result.label_suggestion})"
                 else:
                     excluded[case_id] = result.model_dump()

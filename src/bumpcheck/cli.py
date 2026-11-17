@@ -43,6 +43,12 @@ class BotChoice(str, Enum):
     BOTH = "both"
 
 
+class CIStatusChoice(str, Enum):
+    ANY = "any"
+    FAILURE = "failure"
+    SUCCESS = "success"
+
+
 def _version_callback(value: bool) -> None:
     if value:
         typer.echo(__version__)
@@ -287,6 +293,25 @@ def bench_mine(
         "--limit",
         help="Stop after this many kept candidates, including earlier runs.",
     ),
+    max_per_repo: int = typer.Option(
+        3,
+        "--max-per-repo",
+        help="Skip PRs from repos that already have this many candidates.",
+    ),
+    ci_status: CIStatusChoice = typer.Option(
+        CIStatusChoice.ANY,
+        "--ci-status",
+        help="Only search PRs whose checks are failing or passing.",
+    ),
+    skip_repo_pattern: list[str] | None = typer.Option(
+        None,
+        "--skip-repo-pattern",
+        help=(
+            "Case-insensitive regex matched against owner/name; repeatable. "
+            "Patterns starting with a literal '^' and containing no '/' match "
+            "the repo name only. Any pattern replaces the built-in noise list."
+        ),
+    ),
     logs: bool = typer.Option(
         False,
         "--logs",
@@ -321,6 +346,9 @@ def bench_mine(
             logs=logs,
             offline=offline,
             cache_dir=cache_dir,
+            max_per_repo=max_per_repo,
+            ci_status=ci_status.value,
+            skip_repo_patterns=skip_repo_pattern,
         )
     except (GitHubError, ValueError) as exc:
         typer.echo(str(exc), err=True)

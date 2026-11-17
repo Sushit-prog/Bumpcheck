@@ -10,6 +10,8 @@ Bot = Literal["dependabot", "renovate"]
 CISummary = Literal["all_passed", "some_failed", "none"]
 LabelSuggestion = Literal["OK_SUSPECT", "BROKE_SUSPECT", "UNCLEAR"]
 BaseComparisonStatus = Literal["preexisting", "regression", "no_base_run"]
+CIStatus = Literal["any", "failure", "success"]
+LogStatus = Literal["matched", "fetched_no_match", "unavailable"]
 LockKind = Literal["uv.lock", "poetry.lock", "requirements"]
 Split = Literal["dev", "test"]
 ExcludedReason = Literal[
@@ -20,6 +22,8 @@ ExcludedReason = Literal[
     "no_ci",
     "ci_not_attributable",
     "closed_without_ci_signal",
+    "noise_repo",
+    "repo_cap",
     "other",
 ]
 
@@ -50,6 +54,7 @@ class FailureExcerpt(BaseModel):
 
     check_name: str
     lines: list[str] = Field(default_factory=list)
+    log_status: LogStatus = "unavailable"
 
 
 class LaterFix(BaseModel):
@@ -90,6 +95,7 @@ class Candidate(BaseModel):
     later_fix_commits: list[LaterFix] = Field(default_factory=list)
     split: Split
     rerun_flaky: bool = False
+    sampled_by: CIStatus = "any"
     label: str | None = None
 
 
@@ -101,6 +107,7 @@ class Excluded(BaseModel):
     case_id: str
     repo: str
     pr_number: int
+    title: str = ""
     reason: ExcludedReason
 
 

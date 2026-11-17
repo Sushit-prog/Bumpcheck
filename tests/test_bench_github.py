@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import http.client
 import json
+import urllib.error
 from pathlib import Path
 
 import pytest
@@ -159,6 +161,61 @@ def test_server_errors_back_off_and_then_fail(tmp_path: Path) -> None:
     assert excinfo.value.status == 500
     assert len(recorder.calls) == 3
     assert sleeps == [1.0, 2.0]
+
+
+def test_network_errors_are_retried_then_succeed(tmp_path: Path) -> None:
+    url = "https://api.github.com/repos/o/r"
+    attempts = {"count": 0}
+
+    def route(method: str, url: str, headers: dict) -> tuple:
+        attempts["count"] += 1
+        if attempts["count"] < 3:
+            raise http.client.IncompleteRead(b"partial", 10)
+        return _json({"ok": True})
+
+    sleeps: list[float] = []
+    client = _client(Recorder({url: route}), tmp_path, sleeps=sleeps)
+
+    assert client.get_json(url) == {"ok": True}
+    assert attempts["count"] == 3
+    assert sleeps == [1.0, 2.0]
+
+
+def test_network_errors_give_up_after_five_attempts(tmp_path: Path) -> None:
+    url = "https://api.github.com/repos/o/r"
+
+    def route(method: str, url: str, headers: dict) -> tuple:
+        raise urllib.error.URLError("offline")
+
+    sleeps: list[float] = []
+    recorder = Recorder({url: route})
+    client = _client(recorder, tmp_path, sleeps=sleeps)
+
+    with pytest.raises(GitHubError) as excinfo:
+        client.get_json(url)
+
+    message = str(excinfo.value)
+    assert "Network error after 5 attempts for /repos/o/r" in message
+    assert "URLError" in message
+    assert "offline" in message
+    assert "test-token" not in message
+    assert len(recorder.calls) == 5
+    assert sleeps == [1.0, 2.0, 4.0, 8.0]
+
+
+def test_transport_http_error_becomes_http_status_error(tmp_path: Path) -> None:
+    url = "https://api.github.com/repos/o/r"
+
+    def route(method: str, url: str, headers: dict) -> tuple:
+        raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+
+    client = _client(Recorder({url: route}), tmp_path)
+
+    with pytest.raises(HttpStatusError) as excinfo:
+        client.get_json(url)
+
+    assert excinfo.value.status == 404
+    assert excinfo.value.body == b""
 
 
 def test_search_requests_are_throttled(tmp_path: Path) -> None:
