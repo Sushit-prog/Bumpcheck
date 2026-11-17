@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import date
 from enum import Enum
 from pathlib import Path
 
@@ -10,6 +11,8 @@ from packaging.version import InvalidVersion, Version
 
 from bumpcheck import __version__
 from bumpcheck.apidiff import ApiDiffResult, diff_versions
+from bumpcheck.bench.github import GitHubError
+from bumpcheck.bench.mine import mine as run_mine
 from bumpcheck.check import check as run_check
 from bumpcheck.check import format_text
 from bumpcheck.lockdiff import LockParseError, parse_lock_pair
@@ -32,6 +35,12 @@ class FailOn(str, Enum):
     LIKELY_BREAKING = "LIKELY_BREAKING"
     REVIEW = "REVIEW"
     UNKNOWN = "UNKNOWN"
+
+
+class BotChoice(str, Enum):
+    DEPENDABOT = "dependabot"
+    RENOVATE = "renovate"
+    BOTH = "both"
 
 
 def _version_callback(value: bool) -> None:
@@ -245,3 +254,74 @@ def check(
 
     if fail_on is not None and at_or_above(result.overall, fail_on.value):
         raise typer.Exit(code=1)
+
+
+bench_app = typer.Typer(no_args_is_help=True, help="Mine and prepare benchmark data.")
+app.add_typer(bench_app, name="bench")
+
+
+@bench_app.command("mine")
+def bench_mine(
+    out: Path = typer.Option(
+        ...,
+        "--out",
+        help="Directory for candidates.jsonl, excluded.jsonl and summary.json.",
+    ),
+    bot: BotChoice = typer.Option(
+        BotChoice.BOTH,
+        "--bot",
+        help="Which dependency bot to mine.",
+    ),
+    since: str | None = typer.Option(
+        None,
+        "--since",
+        help="Earliest closed date (YYYY-MM-DD); defaults to 180 days before --until.",
+    ),
+    until: str | None = typer.Option(
+        None,
+        "--until",
+        help="Latest closed date, exclusive (YYYY-MM-DD); defaults to today.",
+    ),
+    limit: int = typer.Option(
+        60,
+        "--limit",
+        help="Stop after this many kept candidates, including earlier runs.",
+    ),
+    logs: bool = typer.Option(
+        False,
+        "--logs",
+        help="Fetch job logs for failing checks (requires GITHUB_TOKEN).",
+    ),
+    offline: bool = typer.Option(
+        False,
+        "--offline",
+        help="Read the response cache only; never touch the network.",
+    ),
+    cache_dir: Path | None = typer.Option(
+        None,
+        "--cache-dir",
+        help="GitHub response cache directory (default .bumpcheck-cache/github).",
+    ),
+) -> None:
+    """Mine public Dependabot/Renovate PRs as benchmark candidates."""
+    try:
+        since_date = date.fromisoformat(since) if since else None
+        until_date = date.fromisoformat(until) if until else None
+    except ValueError as exc:
+        typer.echo(f"Invalid date: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+
+    try:
+        run_mine(
+            out=out,
+            bot=bot.value,
+            since=since_date,
+            until=until_date,
+            limit=limit,
+            logs=logs,
+            offline=offline,
+            cache_dir=cache_dir,
+        )
+    except (GitHubError, ValueError) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
