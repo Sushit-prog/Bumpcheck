@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 Bot = Literal["dependabot", "renovate"]
 CISummary = Literal["all_passed", "some_failed", "none"]
 LabelSuggestion = Literal["OK_SUSPECT", "BROKE_SUSPECT", "UNCLEAR"]
+BaseComparisonStatus = Literal["preexisting", "regression", "no_base_run"]
 LockKind = Literal["uv.lock", "poetry.lock", "requirements"]
 Split = Literal["dev", "test"]
 ExcludedReason = Literal[
@@ -31,6 +32,15 @@ class CheckRef(BaseModel):
     name: str
     conclusion: str
     html_url: str | None = None
+
+
+class FailureVsBase(BaseModel):
+    """A failing head check compared against the same check at the base commit."""
+
+    model_config = ConfigDict(frozen=True)
+
+    name: str
+    status: BaseComparisonStatus
 
 
 class FailureExcerpt(BaseModel):
@@ -72,7 +82,9 @@ class Candidate(BaseModel):
     lockfile_kind: LockKind
     lockfile_paths: list[str]
     ci_checks: list[CheckRef]
+    base_ci_checks: list[CheckRef] = Field(default_factory=list)
     ci_summary: CISummary
+    failure_vs_base: list[FailureVsBase] = Field(default_factory=list)
     label_suggestion: LabelSuggestion
     failure_excerpts: list[FailureExcerpt] = Field(default_factory=list)
     later_fix_commits: list[LaterFix] = Field(default_factory=list)

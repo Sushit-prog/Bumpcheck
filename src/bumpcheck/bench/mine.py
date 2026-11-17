@@ -26,11 +26,13 @@ from bumpcheck.bench import github
 from bumpcheck.bench.github import GitHubClient, GitHubError, HttpStatusError
 from bumpcheck.bench.lockfiles import lockfile_kind
 from bumpcheck.bench.models import (
+    BaseComparisonStatus,
     Candidate,
     CheckRef,
     Excluded,
     ExcludedReason,
     FailureExcerpt,
+    FailureVsBase,
     LaterFix,
     Summary,
 )
@@ -276,14 +278,12 @@ def _conclusion_from_state(state: str) -> str:
     return {"success": "success", "failure": "failure", "error": "error"}.get(state, state)
 
 
-def _collect_checks(
-    client: GitHubClient, base_url: str, head_sha: str
-) -> tuple[list[_Check], bool, bool]:
+def _fetch_check_runs(client: GitHubClient, base_url: str, sha: str) -> list[dict]:
     runs: list[dict] = []
     page = 1
     while page <= MAX_CHECK_PAGES:
         payload = client.get_json(
-            f"{base_url}/commits/{head_sha}/check-runs?filter=all&per_page={PAGE_SIZE}&page={page}"
+            f"{base_url}/commits/{sha}/check-runs?filter=all&per_page={PAGE_SIZE}&page={page}"
         )
         if not isinstance(payload, dict):
             raise GitHubError("Unexpected GitHub check-runs response")
@@ -294,21 +294,54 @@ def _collect_checks(
         if len(chunk) < PAGE_SIZE:
             break
         page += 1
+    return runs
 
+
+def _runs_by_name(runs: list[dict]) -> dict[str, list[dict]]:
     by_name: dict[str, list[dict]] = {}
     for run in runs:
         name = run.get("name")
         if isinstance(name, str) and name:
             by_name.setdefault(name, []).append(run)
+    for attempts in by_name.values():
+        attempts.sort(
+            key=lambda run: (str(run.get("started_at") or ""), _int_or_none(run.get("id")) or 0)
+        )
+    return by_name
+
+
+def _collect_base_checks(client: GitHubClient, base_url: str, base_sha: str) -> list[CheckRef]:
+    by_name = _runs_by_name(_fetch_check_runs(client, base_url, base_sha))
+    checks: list[CheckRef] = []
+    for name in sorted(by_name):
+        latest = by_name[name][-1]
+        status = str(latest.get("status") or "")
+        conclusion = latest.get("conclusion")
+        if status in PENDING_STATES or not isinstance(conclusion, str):
+            continue
+        if conclusion != "success" and conclusion not in FAILURE_CONCLUSIONS:
+            continue
+        checks.append(
+            CheckRef(
+                name=name,
+                conclusion=conclusion,
+                html_url=_str_or_none(latest.get("html_url")),
+            )
+        )
+    return checks
+
+
+def _collect_checks(
+    client: GitHubClient, base_url: str, head_sha: str
+) -> tuple[list[_Check], bool, bool]:
+    runs = _fetch_check_runs(client, base_url, head_sha)
+    by_name = _runs_by_name(runs)
 
     checks: list[_Check] = []
     pending = False
     flaky = False
     for name in sorted(by_name):
-        attempts = sorted(
-            by_name[name],
-            key=lambda run: (str(run.get("started_at") or ""), _int_or_none(run.get("id")) or 0),
-        )
+        attempts = by_name[name]
         latest = attempts[-1]
         status = str(latest.get("status") or "")
         conclusion = latest.get("conclusion")
@@ -565,8 +598,19 @@ def _mine_case(client: GitHubClient, item: SearchItem, *, logs: bool) -> Candida
         return _excluded(item, "ci_not_attributable")
 
     ci_summary = "some_failed" if failed else "all_passed"
+    base_checks: list[CheckRef] = []
+    comparisons: list[FailureVsBase] = []
     if failed:
-        label_suggestion = "BROKE_SUSPECT"
+        try:
+            base_checks = _collect_base_checks(client, base_url, base_sha)
+        except Exception:
+            base_checks = []
+        comparisons = _compare_failures(failed, base_checks)
+        statuses = {comparison.status for comparison in comparisons}
+        if "regression" in statuses or "no_base_run" in statuses:
+            label_suggestion = "BROKE_SUSPECT"
+        else:
+            label_suggestion = "UNCLEAR"
     elif merged:
         label_suggestion = "OK_SUSPECT"
     else:
@@ -608,13 +652,32 @@ def _mine_case(client: GitHubClient, item: SearchItem, *, logs: bool) -> Candida
             CheckRef(name=check.name, conclusion=check.conclusion, html_url=check.html_url)
             for check in checks
         ],
+        base_ci_checks=base_checks,
         ci_summary=ci_summary,
+        failure_vs_base=comparisons,
         label_suggestion=label_suggestion,
         failure_excerpts=failure_excerpts,
         later_fix_commits=later_fixes,
         split=_split_for(item.repo),
         rerun_flaky=flaky,
     )
+
+
+def _compare_failures(failed: list[_Check], base_checks: list[CheckRef]) -> list[FailureVsBase]:
+    base_conclusions = {check.name: check.conclusion for check in base_checks}
+    comparisons: list[FailureVsBase] = []
+    for check in failed:
+        base = base_conclusions.get(check.name)
+        if base is None:
+            status: BaseComparisonStatus = "no_base_run"
+        elif base in FAILURE_CONCLUSIONS:
+            status = "preexisting"
+        elif base == "success":
+            status = "regression"
+        else:
+            status = "no_base_run"
+        comparisons.append(FailureVsBase(name=check.name, status=status))
+    return comparisons
 
 
 def _mine_safely(client: GitHubClient, item: SearchItem, *, logs: bool) -> Candidate | Excluded:

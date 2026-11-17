@@ -152,7 +152,11 @@ head commit. It writes three files to `--out`:
 CI outcomes are noisy suggestions, not labels. `OK_SUSPECT` means every
 signal-bearing check passed on a merged PR, `BROKE_SUSPECT` means at least one
 non-lint check failed, and `UNCLEAR` covers everything else (for example a
-passing PR that was closed without merging). Cancelled, skipped, neutral and
+passing PR that was closed without merging). For failing checks the same check
+is compared against the base commit (`base_ci_checks`, `failure_vs_base`):
+a `regression` (passed at base) or a check with `no_base_run` keeps
+`BROKE_SUSPECT`, while failures that were already `preexisting` at base are
+downgraded to `UNCLEAR`. Cancelled, skipped, neutral and
 stale conclusions are ignored; PRs with pending checks are excluded. Every
 candidate still needs hand verification.
 

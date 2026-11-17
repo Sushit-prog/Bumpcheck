@@ -50,6 +50,42 @@ FAILURE_CHECK = {
     "html_url": "https://ci/tests",
 }
 
+BUILD_FAILURE_CHECK = {
+    "id": 9002,
+    "name": "build",
+    "status": "completed",
+    "conclusion": "failure",
+    "started_at": "2026-01-02T00:00:00Z",
+    "html_url": "https://ci/build",
+}
+
+BASE_SUCCESS_CHECK = {
+    "id": 8001,
+    "name": "tests",
+    "status": "completed",
+    "conclusion": "success",
+    "started_at": "2026-01-01T00:00:00Z",
+    "html_url": "https://ci/tests/base",
+}
+
+BASE_FAILURE_CHECK = {
+    "id": 8001,
+    "name": "tests",
+    "status": "completed",
+    "conclusion": "failure",
+    "started_at": "2026-01-01T00:00:00Z",
+    "html_url": "https://ci/tests/base",
+}
+
+BASE_BUILD_FAILURE_CHECK = {
+    "id": 8002,
+    "name": "build",
+    "status": "completed",
+    "conclusion": "failure",
+    "started_at": "2026-01-01T00:00:00Z",
+    "html_url": "https://ci/build/base",
+}
+
 
 def _json(payload: object) -> tuple[int, dict, bytes]:
     return 200, {"Content-Type": "application/json"}, json.dumps(payload).encode("utf-8")
@@ -63,6 +99,8 @@ class FakeGitHub:
         self.merged_at = config.pop("merged_at", "2026-01-05T10:00:00Z")
         self.closed_at = config.pop("closed_at", "2026-01-05T10:00:00Z")
         self.check_runs = config.pop("check_runs", None)
+        self.base_check_runs = config.pop("base_check_runs", None)
+        self.base_check_runs_status = config.pop("base_check_runs_status", 200)
         self.statuses = config.pop("statuses", None)
         self.commits = config.pop("commits", None)
         self.log_text = config.pop("log_text", None)
@@ -98,6 +136,9 @@ class FakeGitHub:
         if self.check_runs is not None:
             return self.check_runs  # type: ignore[return-value]
         return [SUCCESS_CHECK]
+
+    def _base_check_runs(self) -> list[dict]:
+        return self.base_check_runs if self.base_check_runs is not None else []  # type: ignore[return-value]
 
     def _statuses(self) -> list[dict]:
         return self.statuses if self.statuses is not None else []  # type: ignore[return-value]
@@ -137,6 +178,11 @@ class FakeGitHub:
             return _json(self._files())
         if path == f"{base}/commits/{HEAD_SHA}/check-runs":
             return _json({"total_count": len(self._check_runs()), "check_runs": self._check_runs()})
+        if path == f"{base}/commits/{BASE_SHA}/check-runs":
+            if self.base_check_runs_status >= 400:
+                return self.base_check_runs_status, {}, b'{"message": "base unavailable"}'
+            runs = self._base_check_runs()
+            return _json({"total_count": len(runs), "check_runs": runs})
         if path == f"{base}/commits/{HEAD_SHA}/status":
             return _json({"statuses": self._statuses()})
         if path == f"{base}/commits":
@@ -279,7 +325,8 @@ def test_search_url_uses_closed_windows() -> None:
 
 
 def test_ok_suspect_candidate(tmp_path: Path) -> None:
-    candidate, out = _candidate(tmp_path, FakeGitHub())
+    fake = FakeGitHub()
+    candidate, out = _candidate(tmp_path, fake)
 
     assert candidate["case_id"] == f"{REPO_FULL}#{PR_NUMBER}"
     assert candidate["repo"] == REPO_FULL
@@ -298,6 +345,8 @@ def test_ok_suspect_candidate(tmp_path: Path) -> None:
         {"name": "tests", "conclusion": "success", "html_url": "https://ci/tests"}
     ]
     assert candidate["ci_summary"] == "all_passed"
+    assert candidate["base_ci_checks"] == []
+    assert candidate["failure_vs_base"] == []
     assert candidate["label_suggestion"] == "OK_SUSPECT"
     assert candidate["failure_excerpts"] == []
     assert candidate["later_fix_commits"] == []
@@ -305,6 +354,11 @@ def test_ok_suspect_candidate(tmp_path: Path) -> None:
     assert candidate["rerun_flaky"] is False
     assert candidate["label"] is None
     assert "mined_at" not in candidate
+    assert not any(
+        urllib.parse.urlparse(call["url"]).path
+        == f"/repos/{REPO_FULL}/commits/{BASE_SHA}/check-runs"
+        for call in fake.calls
+    )
     assert (out / "excluded.jsonl").read_text(encoding="utf-8") == ""
 
     summary = json.loads((out / "summary.json").read_text(encoding="utf-8"))
@@ -332,6 +386,96 @@ def test_broke_suspect_records_failure_and_later_fix(tmp_path: Path) -> None:
             "date": "2026-01-06T00:00:00Z",
         }
     ]
+
+
+def test_all_preexisting_failures_are_unclear(tmp_path: Path) -> None:
+    candidate, _ = _candidate(
+        tmp_path,
+        FakeGitHub(check_runs=[FAILURE_CHECK], base_check_runs=[BASE_FAILURE_CHECK]),
+    )
+
+    assert candidate["ci_summary"] == "some_failed"
+    assert candidate["base_ci_checks"] == [
+        {"name": "tests", "conclusion": "failure", "html_url": "https://ci/tests/base"}
+    ]
+    assert candidate["failure_vs_base"] == [{"name": "tests", "status": "preexisting"}]
+    assert candidate["label_suggestion"] == "UNCLEAR"
+    assert candidate["later_fix_commits"] == []
+
+
+def test_single_regression_stays_broke(tmp_path: Path) -> None:
+    candidate, _ = _candidate(
+        tmp_path,
+        FakeGitHub(check_runs=[FAILURE_CHECK], base_check_runs=[BASE_SUCCESS_CHECK]),
+    )
+
+    assert candidate["base_ci_checks"] == [
+        {"name": "tests", "conclusion": "success", "html_url": "https://ci/tests/base"}
+    ]
+    assert candidate["failure_vs_base"] == [{"name": "tests", "status": "regression"}]
+    assert candidate["label_suggestion"] == "BROKE_SUSPECT"
+
+
+def test_failure_without_base_run_is_broke(tmp_path: Path) -> None:
+    candidate, _ = _candidate(
+        tmp_path,
+        FakeGitHub(check_runs=[FAILURE_CHECK], base_check_runs=[]),
+    )
+
+    assert candidate["base_ci_checks"] == []
+    assert candidate["failure_vs_base"] == [{"name": "tests", "status": "no_base_run"}]
+    assert candidate["label_suggestion"] == "BROKE_SUSPECT"
+
+
+def test_mixed_preexisting_and_regression_is_broke(tmp_path: Path) -> None:
+    candidate, _ = _candidate(
+        tmp_path,
+        FakeGitHub(
+            check_runs=[FAILURE_CHECK, BUILD_FAILURE_CHECK],
+            base_check_runs=[BASE_SUCCESS_CHECK, BASE_BUILD_FAILURE_CHECK],
+        ),
+    )
+
+    assert candidate["failure_vs_base"] == [
+        {"name": "build", "status": "preexisting"},
+        {"name": "tests", "status": "regression"},
+    ]
+    assert candidate["label_suggestion"] == "BROKE_SUSPECT"
+
+
+def test_base_fetch_error_marks_no_base_run_and_keeps_case(tmp_path: Path) -> None:
+    candidate, _ = _candidate(
+        tmp_path,
+        FakeGitHub(check_runs=[FAILURE_CHECK], base_check_runs_status=500),
+    )
+
+    assert candidate["base_ci_checks"] == []
+    assert candidate["failure_vs_base"] == [{"name": "tests", "status": "no_base_run"}]
+    assert candidate["label_suggestion"] == "BROKE_SUSPECT"
+
+
+def test_legacy_candidate_without_base_fields_loads(tmp_path: Path) -> None:
+    candidate, out = _candidate(tmp_path, FakeGitHub())
+    legacy = {
+        key: value
+        for key, value in candidate.items()
+        if key not in {"base_ci_checks", "failure_vs_base"}
+    }
+    (out / "candidates.jsonl").write_text(json.dumps(legacy) + "\n", encoding="utf-8")
+
+    from bumpcheck.bench.models import Candidate
+
+    loaded = Candidate.model_validate(legacy)
+    assert loaded.base_ci_checks == []
+    assert loaded.failure_vs_base == []
+
+    resumed_out, code = _mine_into(
+        tmp_path, FakeGitHub(), out_name="out", cache_name="cache_legacy", limit=10
+    )
+    assert code == 0
+    records = _read_jsonl(resumed_out / "candidates.jsonl")
+    assert len(records) == 1
+    assert records[0]["case_id"] == candidate["case_id"]
 
 
 def test_later_fix_uses_at_most_two_calls(tmp_path: Path) -> None:
