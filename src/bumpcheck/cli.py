@@ -312,6 +312,21 @@ def bench_mine(
             "the repo name only. Any pattern replaces the built-in noise list."
         ),
     ),
+    window_days: int = typer.Option(
+        7,
+        "--window-days",
+        help="Length in days of each fixed search window.",
+    ),
+    pages_per_window: int = typer.Option(
+        1,
+        "--pages-per-window",
+        help="Search pages to fetch per window and bot (1-10).",
+    ),
+    dependabot_label: str = typer.Option(
+        "python",
+        "--dependabot-label",
+        help='Label appended to Dependabot search queries; pass "" to disable.',
+    ),
     logs: bool = typer.Option(
         False,
         "--logs",
@@ -349,6 +364,9 @@ def bench_mine(
             max_per_repo=max_per_repo,
             ci_status=ci_status.value,
             skip_repo_patterns=skip_repo_pattern,
+            window_days=window_days,
+            pages_per_window=pages_per_window,
+            dependabot_label=dependabot_label,
         )
     except (GitHubError, ValueError) as exc:
         typer.echo(str(exc), err=True)

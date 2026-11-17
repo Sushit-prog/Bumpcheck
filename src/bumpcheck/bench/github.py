@@ -27,7 +27,7 @@ API_ROOT = "https://api.github.com"
 RAW_ROOT = "https://raw.githubusercontent.com"
 USER_AGENT = "bumpcheck-bench/0.1"
 DEFAULT_CACHE_DIR = Path(".bumpcheck-cache") / "github"
-SEARCH_MIN_INTERVAL = 2.0
+SEARCH_MIN_INTERVAL = 3.0
 MIN_REQUEST_INTERVAL = 1.0
 MAX_ATTEMPTS = 3
 MAX_RATE_LIMIT_RETRIES = 4
@@ -160,6 +160,7 @@ class GitHubClient:
         self.cache_dir = Path(cache_dir) if cache_dir is not None else DEFAULT_CACHE_DIR
         self.offline = offline
         self.api_calls = 0
+        self.search_calls = 0
         self.cache_hits = 0
         self._last_request_at: float | None = None
 
@@ -263,6 +264,8 @@ class GitHubClient:
                 net_attempt += 1
                 continue
             self.api_calls += 1
+            if "/search/" in url:
+                self.search_calls += 1
             if status in {403, 429}:
                 rate = self._rate_limit_sleep(response_headers, body, rate_limit_attempt)
                 if rate is not None and rate_limit_attempt < MAX_RATE_LIMIT_RETRIES:

@@ -24,6 +24,7 @@ ExcludedReason = Literal[
     "closed_without_ci_signal",
     "noise_repo",
     "repo_cap",
+    "non_python_package",
     "other",
 ]
 
@@ -125,3 +126,4 @@ class Summary(BaseModel):
     splits: dict[str, int]
     api_calls: int
     cache_hits: int
+    search_calls: int = 0

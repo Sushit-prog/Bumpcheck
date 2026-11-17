@@ -317,6 +317,10 @@ def _mine_into(
     max_per_repo: int = 3,
     ci_status: str = "any",
     skip_repo_patterns: list[str] | None = None,
+    window_days: int = 7,
+    pages_per_window: int = 1,
+    dependabot_label: str = "python",
+    offline: bool = False,
 ) -> tuple[Path, int]:
     client = GitHubClient(
         token="test-token",
@@ -325,6 +329,7 @@ def _mine_into(
         now=lambda: 1000.0,
         rng=lambda: 0.0,
         cache_dir=tmp_path / cache_name,
+        offline=offline,
     )
     out = tmp_path / out_name
     code = mine(
@@ -338,6 +343,9 @@ def _mine_into(
         max_per_repo=max_per_repo,
         ci_status=ci_status,
         skip_repo_patterns=skip_repo_patterns,
+        window_days=window_days,
+        pages_per_window=pages_per_window,
+        dependabot_label=dependabot_label,
     )
     return out, code
 
@@ -356,6 +364,10 @@ def _run(
     max_per_repo: int = 3,
     ci_status: str = "any",
     skip_repo_patterns: list[str] | None = None,
+    window_days: int = 7,
+    pages_per_window: int = 1,
+    dependabot_label: str = "python",
+    offline: bool = False,
 ) -> Path:
     out, _ = _mine_into(
         tmp_path,
@@ -370,6 +382,10 @@ def _run(
         max_per_repo=max_per_repo,
         ci_status=ci_status,
         skip_repo_patterns=skip_repo_patterns,
+        window_days=window_days,
+        pages_per_window=pages_per_window,
+        dependabot_label=dependabot_label,
+        offline=offline,
     )
     return out
 
@@ -404,7 +420,8 @@ def test_search_url_uses_closed_windows() -> None:
     url = search_url("dependabot", date(2026, 1, 1), date(2026, 2, 1), 1)
     query = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)["q"][0]
     assert query == (
-        "is:pr is:closed author:app/dependabot language:python closed:2026-01-01..2026-01-31"
+        "is:pr is:closed author:app/dependabot language:python "
+        "closed:2026-01-01..2026-01-31 label:python"
     )
 
 
@@ -764,17 +781,118 @@ class _StubClient:
         return {"total_count": self.total, "items": self.items}
 
 
-def test_windows_split_when_search_is_capped() -> None:
+def test_capped_window_does_not_split() -> None:
     stub = _StubClient(total=1000, items=[])
-    items = list(_iter_window(stub, "dependabot", date(2026, 1, 1), date(2026, 1, 15)))
+    items = list(_iter_window(stub, "dependabot", date(2026, 1, 1), date(2026, 1, 8)))
+
     assert items == []
-    assert len(stub.urls) > 1
-    for url in stub.urls:
-        query = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)["q"][0]
-        window = query.split("closed:")[1].split()[0]
-        start_text, end_text = window.split("..")
-        assert date.fromisoformat(start_text) >= date(2026, 1, 1)
-        assert date.fromisoformat(end_text) <= date(2026, 1, 14)
+    assert len(stub.urls) == 1
+
+
+def test_windows_are_deterministic_and_spread() -> None:
+    windows = bench_mine._spread_windows(date(2026, 1, 1), date(2026, 1, 29), 7)
+    starts = [start.isoformat() for start, _ in windows]
+
+    assert len(starts) == 4
+    assert starts == sorted(starts, key=lambda start: hashlib.sha256(start.encode()).hexdigest())
+    assert starts != sorted(starts)
+
+
+def test_search_calls_alternate_bots_per_window(tmp_path: Path) -> None:
+    fake = FakeSpread({"2026-01-01": [1], "2026-01-08": [2]})
+    out, code = _mine_into(
+        tmp_path,
+        fake,
+        bot="both",
+        since=date(2026, 1, 1),
+        until=date(2026, 1, 15),
+        window_days=7,
+        max_per_repo=10,
+    )
+
+    assert code == 0
+    queries = [
+        urllib.parse.parse_qs(urllib.parse.urlparse(call["url"]).query)["q"][0]
+        for call in fake.calls
+        if "/search/issues" in call["url"]
+    ]
+    bots = [query.split("author:app/")[1].split()[0] for query in queries]
+    assert bots == ["dependabot", "renovate", "dependabot", "renovate"]
+    summary = json.loads((out / "summary.json").read_text(encoding="utf-8"))
+    assert summary["search_calls"] == 4
+
+
+def test_pages_per_window_fetches_each_page(tmp_path: Path) -> None:
+    windows = {"2026-01-01": list(range(1, 101))}
+    fake = FakeSpread(windows)
+    _, code = _mine_into(
+        tmp_path,
+        fake,
+        bot="dependabot",
+        since=date(2026, 1, 1),
+        until=date(2026, 1, 8),
+        limit=200,
+        max_per_repo=200,
+        pages_per_window=2,
+    )
+
+    assert code == 0
+    search_calls = [call for call in fake.calls if "/search/issues" in call["url"]]
+    assert len(search_calls) == 2
+    assert "page=1" in search_calls[0]["url"]
+    assert "page=2" in search_calls[1]["url"]
+
+
+def test_limit_stops_before_the_second_page(tmp_path: Path) -> None:
+    fake = FakeSpread({"2026-01-01": list(range(1, 101))})
+    out, code = _mine_into(
+        tmp_path,
+        fake,
+        bot="dependabot",
+        since=date(2026, 1, 1),
+        until=date(2026, 1, 8),
+        limit=1,
+        max_per_repo=10,
+        pages_per_window=5,
+    )
+
+    assert code == 0
+    assert len(_read_jsonl(out / "candidates.jsonl")) == 1
+    assert len([call for call in fake.calls if "/search/issues" in call["url"]]) == 1
+
+
+def test_resume_replays_cached_search_pages(tmp_path: Path) -> None:
+    windows = {"2026-01-01": [1], "2026-01-08": [2]}
+    first = FakeSpread(windows)
+    out, _ = _mine_into(
+        tmp_path,
+        first,
+        bot="dependabot",
+        since=date(2026, 1, 1),
+        until=date(2026, 1, 15),
+        window_days=7,
+        max_per_repo=10,
+    )
+    assert len(_read_jsonl(out / "candidates.jsonl")) == 2
+
+    class _Offline(FakeSpread):
+        def __call__(self, method: str, url: str, headers: dict) -> tuple:
+            raise AssertionError(f"unexpected request: {url}")
+
+    _, code = _mine_into(
+        tmp_path,
+        _Offline(windows),
+        bot="dependabot",
+        since=date(2026, 1, 1),
+        until=date(2026, 1, 15),
+        window_days=7,
+        limit=4,
+        max_per_repo=10,
+        offline=True,
+    )
+
+    assert code == 0
+    assert len(_read_jsonl(out / "candidates.jsonl")) == 2
 
 
 def test_progress_lines_report_kept_and_excluded_without_token(
@@ -906,6 +1024,56 @@ def test_search_url_can_filter_ci_status() -> None:
     assert query.endswith(" status:failure")
 
 
+def _search_query(url: str) -> str:
+    return urllib.parse.parse_qs(urllib.parse.urlparse(url).query)["q"][0]
+
+
+def test_search_url_appends_label_only_to_dependabot() -> None:
+    dependabot = _search_query(search_url("dependabot", date(2026, 1, 1), date(2026, 2, 1), 1))
+    renovate = _search_query(search_url("renovate", date(2026, 1, 1), date(2026, 2, 1), 1))
+    custom = _search_query(
+        search_url("dependabot", date(2026, 1, 1), date(2026, 2, 1), 1, "failure", "deps")
+    )
+    disabled = _search_query(
+        search_url("dependabot", date(2026, 1, 1), date(2026, 2, 1), 1, "any", "")
+    )
+
+    assert dependabot.endswith(" label:python")
+    assert "label:" not in renovate
+    assert custom.endswith(" status:failure label:deps")
+    assert "label:" not in disabled
+
+
+def test_dependabot_label_is_sent_in_queries(tmp_path: Path) -> None:
+    fake = FakeGitHub()
+    _candidate(tmp_path, fake, dependabot_label="security")
+
+    queries = [_search_query(call["url"]) for call in fake.calls if "/search/issues" in call["url"]]
+    dependabot_queries = [query for query in queries if "author:app/dependabot" in query]
+    assert dependabot_queries
+    assert all(query.endswith(" label:security") for query in dependabot_queries)
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "Bump docker/build-push-action from 6 to 7",
+        "Bump @types/node from 1 to 2",
+    ],
+)
+def test_non_python_package_titles_are_excluded_before_pr_fetch(tmp_path: Path, title: str) -> None:
+    fake = FakeGitHub(title=title)
+    excluded = _excluded(tmp_path, fake)
+
+    assert excluded["reason"] == "non_python_package"
+    assert not any("/pulls/" in call["url"] for call in fake.calls)
+
+
+def test_python_package_title_is_not_filtered(tmp_path: Path) -> None:
+    candidate, _ = _candidate(tmp_path, FakeGitHub(title="Bump requests from 2.31.0 to 2.32.0"))
+    assert candidate["package"] == "requests"
+
+
 def test_ci_status_is_recorded_and_sent(tmp_path: Path) -> None:
     fake = FakeGitHub()
     candidate, _ = _candidate(tmp_path, fake, ci_status="success")
@@ -917,7 +1085,7 @@ def test_ci_status_is_recorded_and_sent(tmp_path: Path) -> None:
         if "/search/issues" in call["url"]
     ]
     assert queries
-    assert all(query.endswith(" status:success") for query in queries)
+    assert all(" status:success" in query for query in queries)
 
 
 def test_default_noise_repos_are_excluded_without_fetching_pr(tmp_path: Path) -> None:
@@ -1014,31 +1182,15 @@ def test_max_per_repo_must_be_positive(tmp_path: Path) -> None:
         _mine_into(tmp_path, FakeGitHub(), max_per_repo=0)
 
 
-def test_month_windows_are_round_robin(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    fake = FakeSpread(
-        {
-            "2026-01-01": [1, 2],
-            "2026-02-01": [11, 12],
-            "2026-03-01": [21],
-        }
-    )
-    out, code = _mine_into(
-        tmp_path,
-        fake,
-        bot="dependabot",
-        since=date(2026, 1, 1),
-        until=date(2026, 4, 1),
-        max_per_repo=10,
-    )
+def test_window_days_must_be_positive(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="--window-days"):
+        _mine_into(tmp_path, FakeGitHub(), window_days=0)
 
-    assert code == 0
-    order = [
-        line.split("] ", 1)[1].split(" -> ", 1)[0]
-        for line in capsys.readouterr().err.splitlines()
-        if " -> " in line
-    ]
-    assert order == [f"{REPO_FULL}#{number}" for number in (1, 11, 21, 2, 12)]
-    assert len(_read_jsonl(out / "candidates.jsonl")) == 5
+
+@pytest.mark.parametrize("pages", [0, 11])
+def test_pages_per_window_must_be_in_range(tmp_path: Path, pages: int) -> None:
+    with pytest.raises(ValueError, match="--pages-per-window"):
+        _mine_into(tmp_path, FakeGitHub(), pages_per_window=pages)
 
 
 def _commit(sha: str, message: str, date: str) -> dict:

@@ -143,12 +143,30 @@ head commit. It writes three files to `--out`:
 - `candidates.jsonl`: one candidate per line, sorted by `case_id`. Every
   candidate has a null `label` field, ready for hand labelling.
 - `excluded.jsonl`: every inspected PR that was rejected, with a reason:
-  `group_bump`, `not_single_package`, `no_supported_lockfile`,
-  `parse_mismatch`, `no_ci`, `ci_not_attributable`,
-  `closed_without_ci_signal`, `noise_repo`, `repo_cap`, or `other`. Each
-  record keeps the PR title so rejections can be audited.
+  `group_bump`, `not_single_package`, `non_python_package`,
+  `no_supported_lockfile`, `parse_mismatch`, `no_ci`,
+  `ci_not_attributable`, `closed_without_ci_signal`, `noise_repo`,
+  `repo_cap`, or `other`. Each record keeps the PR title so rejections can be
+  audited.
 - `summary.json`: counts per label suggestion, bot, split and exclusion
-  reason, plus distinct repos and API calls made.
+  reason, plus distinct repos, API calls (`api_calls`) and search requests
+  (`search_calls`).
+
+Discovery walks fixed `--window-days` windows (default 7) from `--since` to
+`--until`, ordered deterministically by the SHA-256 of each window's start
+date so neighbouring requests are not adjacent dates. Windows are visited
+lazily and sequentially: each window is searched for each selected bot
+(Dependabot first), only the first `--pages-per-window` pages are read
+(default 1, max 10), and items are yielded sorted by `(created_at, number)`
+before moving on. A window whose `total_count` reaches GitHub's 1000-result
+cap is not split. The next window is only fetched when another item is
+needed, and reaching `--limit` stops all further search requests.
+
+Titles classified as single-package bumps whose package name contains `/` or
+starts with `@` (GitHub Actions/Docker references and npm scopes) are excluded
+as `non_python_package` before any per-PR request. `--dependabot-label TEXT`
+(default `python`; pass `""` to disable) appends `label:TEXT` to Dependabot
+search queries only; Renovate queries are unchanged.
 
 Repos matching a built-in noise list (for example repo names starting with
 `skills-`, plus `secure-code-game`, `codeql`, `copilot-codespaces`, `opensafely`)
@@ -189,7 +207,7 @@ Responses are cached under `.bumpcheck-cache/github/` (override with
 `--cache-dir`), and `--offline` replays a warm cache without touching the
 network. `GITHUB_TOKEN` is optional but required for `--logs` and for usable
 rate limits; it is never written to the cache or to any output file. Requests are
-spaced at least 1 second apart (search at least 2), transient network errors
+spaced at least 1 second apart (search at least 3), transient network errors
 are retried up to four times with jittered exponential backoff, and
 rate-limit 403/429 responses are retried with the API's own retry hint (or a
 doubling backoff, up to four retries) before failing with the API's message.

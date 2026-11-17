@@ -43,8 +43,11 @@ from bumpcheck.lockdiff import LockParseError, parse_lock_pair
 PAGE_SIZE = 100
 MAX_FILES = 300
 MAX_CHECK_PAGES = 10
-MAX_WINDOW_DEPTH = 14
 DEFAULT_SINCE_DAYS = 180
+DEFAULT_WINDOW_DAYS = 7
+DEFAULT_PAGES_PER_WINDOW = 1
+MAX_PAGES_PER_WINDOW = 10
+DEFAULT_DEPENDABOT_LABEL = "python"
 MAX_LOG_LINES_PER_CHECK = 4
 MAX_LOG_LINES_PER_CASE = 40
 MAX_LOG_BYTES_PER_CASE = 16 * 1024
@@ -101,7 +104,14 @@ class _Check:
     job_id: int | None = None
 
 
-def search_url(bot: str, start: dt.date, end: dt.date, page: int, ci_status: str = "any") -> str:
+def search_url(
+    bot: str,
+    start: dt.date,
+    end: dt.date,
+    page: int,
+    ci_status: str = "any",
+    dependabot_label: str = DEFAULT_DEPENDABOT_LABEL,
+) -> str:
     """Build a search URL for closed PRs by ``bot`` in ``[start, end)``."""
     inclusive_end = end - dt.timedelta(days=1)
     query = (
@@ -111,6 +121,8 @@ def search_url(bot: str, start: dt.date, end: dt.date, page: int, ci_status: str
     )
     if ci_status in {"failure", "success"}:
         query = f"{query} status:{ci_status}"
+    if bot == "dependabot" and dependabot_label:
+        query = f"{query} label:{dependabot_label}"
     params = urllib.parse.urlencode(
         {"q": query, "per_page": PAGE_SIZE, "page": page, "sort": "created", "order": "asc"}
     )
@@ -159,16 +171,15 @@ def _fetch_search_page(
     end: dt.date,
     page: int,
     ci_status: str = "any",
-) -> tuple[int, list[SearchItem]]:
-    payload = client.get_json(search_url(bot, start, end, page, ci_status))
+    dependabot_label: str = DEFAULT_DEPENDABOT_LABEL,
+) -> list[SearchItem]:
+    payload = client.get_json(search_url(bot, start, end, page, ci_status, dependabot_label))
     if not isinstance(payload, dict):
         raise GitHubError("Unexpected GitHub search response")
-    total = payload.get("total_count")
     raw_items = payload.get("items")
     if not isinstance(raw_items, list):
         raw_items = []
-    items = [item for item in map(_search_item, raw_items) if item is not None]
-    return (total if isinstance(total, int) else len(items)), items
+    return [item for item in map(_search_item, raw_items) if item is not None]
 
 
 def _iter_window(
@@ -176,42 +187,37 @@ def _iter_window(
     bot: str,
     start: dt.date,
     end: dt.date,
-    depth: int = 0,
+    pages: int = DEFAULT_PAGES_PER_WINDOW,
     ci_status: str = "any",
+    dependabot_label: str = DEFAULT_DEPENDABOT_LABEL,
 ) -> Iterator[SearchItem]:
     if start >= end:
         return
-    total, items = _fetch_search_page(client, bot, start, end, 1, ci_status)
-    days = (end - start).days
-    if total >= 1000 and days > 1 and depth < MAX_WINDOW_DEPTH:
-        mid = start + dt.timedelta(days=days // 2)
-        yield from _iter_window(client, bot, start, mid, depth + 1, ci_status)
-        yield from _iter_window(client, bot, mid, end, depth + 1, ci_status)
-        return
-    items.sort(key=lambda item: (item.created_at, item.number))
-    yield from items
-    page = 1
-    while len(items) >= PAGE_SIZE and page < MAX_CHECK_PAGES:
-        page += 1
-        total, items = _fetch_search_page(client, bot, start, end, page, ci_status)
+    for page in range(1, pages + 1):
+        items = _fetch_search_page(client, bot, start, end, page, ci_status, dependabot_label)
         items.sort(key=lambda item: (item.created_at, item.number))
         yield from items
+        if len(items) < PAGE_SIZE:
+            break
 
 
-def _next_month(day: dt.date) -> dt.date:
-    if day.month == 12:
-        return dt.date(day.year + 1, 1, 1)
-    return dt.date(day.year, day.month + 1, 1)
-
-
-def _month_windows(since: dt.date, until: dt.date) -> list[tuple[dt.date, dt.date]]:
+def _day_windows(since: dt.date, until: dt.date, window_days: int) -> list[tuple[dt.date, dt.date]]:
     windows: list[tuple[dt.date, dt.date]] = []
     start = since
     while start < until:
-        end = min(_next_month(start), until)
+        end = min(start + dt.timedelta(days=window_days), until)
         windows.append((start, end))
         start = end
     return windows
+
+
+def _spread_windows(
+    since: dt.date, until: dt.date, window_days: int
+) -> list[tuple[dt.date, dt.date]]:
+    return sorted(
+        _day_windows(since, until, window_days),
+        key=lambda window: hashlib.sha256(window[0].isoformat().encode("utf-8")).hexdigest(),
+    )
 
 
 def _iter_discoveries(
@@ -219,22 +225,23 @@ def _iter_discoveries(
     bots: list[str],
     since: dt.date,
     until: dt.date,
+    *,
+    window_days: int = DEFAULT_WINDOW_DAYS,
+    pages_per_window: int = DEFAULT_PAGES_PER_WINDOW,
     ci_status: str = "any",
+    dependabot_label: str = DEFAULT_DEPENDABOT_LABEL,
 ) -> Iterator[SearchItem]:
-    windows = {bot: _month_windows(since, until) for bot in bots}
-    generators = [
-        _iter_window(client, bot, *windows[bot][index], ci_status=ci_status)
-        for index in range(max((len(found) for found in windows.values()), default=0))
-        for bot in bots
-        if index < len(windows[bot])
-    ]
-    active = list(generators)
-    while active:
-        for generator in list(active):
-            try:
-                yield next(generator)
-            except StopIteration:
-                active.remove(generator)
+    for start, end in _spread_windows(since, until, window_days):
+        for bot in bots:
+            yield from _iter_window(
+                client,
+                bot,
+                start,
+                end,
+                pages_per_window,
+                ci_status,
+                dependabot_label,
+            )
 
 
 def _excluded(item: SearchItem, reason: ExcludedReason, title: str | None = None) -> Excluded:
@@ -265,6 +272,10 @@ def _is_noise(repo: str, patterns: list[re.Pattern[str]]) -> bool:
         if pattern.search(repo_name if anchored_to_name else repo):
             return True
     return False
+
+
+def _is_non_python_package(name: str) -> bool:
+    return "/" in name or name.startswith("@")
 
 
 def _split_for(repo: str) -> str:
@@ -599,6 +610,8 @@ def _mine_case(
     title_result = classify_title(item.title, cast(Bot, bot))
     if title_result.parsed is None:
         return _excluded(item, title_result.reason or "other")
+    if _is_non_python_package(title_result.parsed.name):
+        return _excluded(item, "non_python_package")
 
     pr = client.get_json(f"{base_url}/pulls/{item.number}")
     if not isinstance(pr, dict):
@@ -608,6 +621,8 @@ def _mine_case(
         title_result = classify_title(title, cast(Bot, bot))
         if title_result.parsed is None:
             return _excluded(item, title_result.reason or "other", title=title)
+        if _is_non_python_package(title_result.parsed.name):
+            return _excluded(item, "non_python_package", title=title)
     parsed = title_result.parsed
 
     base = pr.get("base") if isinstance(pr.get("base"), dict) else {}
@@ -848,6 +863,7 @@ def _build_summary(
         splits={key: splits[key] for key in sorted(splits)},
         api_calls=client.api_calls,
         cache_hits=client.cache_hits,
+        search_calls=client.search_calls,
     )
 
 
@@ -875,6 +891,9 @@ def mine(
     max_per_repo: int = DEFAULT_MAX_PER_REPO,
     ci_status: str = "any",
     skip_repo_patterns: list[str] | None = None,
+    window_days: int = DEFAULT_WINDOW_DAYS,
+    pages_per_window: int = DEFAULT_PAGES_PER_WINDOW,
+    dependabot_label: str = DEFAULT_DEPENDABOT_LABEL,
 ) -> int:
     """Mine candidates into ``out``; returns a process exit code."""
     if bot not in {"dependabot", "renovate", "both"}:
@@ -885,6 +904,10 @@ def mine(
         raise ValueError("--max-per-repo must be one or greater")
     if ci_status not in {"any", "failure", "success"}:
         raise ValueError(f"Unknown --ci-status choice: {ci_status!r}")
+    if window_days < 1:
+        raise ValueError("--window-days must be one or greater")
+    if not 1 <= pages_per_window <= MAX_PAGES_PER_WINDOW:
+        raise ValueError(f"--pages-per-window must be between 1 and {MAX_PAGES_PER_WINDOW}")
 
     until_date = until or dt.date.today()
     since_date = since or (until_date - dt.timedelta(days=DEFAULT_SINCE_DAYS))
@@ -909,7 +932,16 @@ def mine(
     try:
         if len(candidates) < limit:
             bots = ["dependabot", "renovate"] if bot == "both" else [bot]
-            discoveries = _iter_discoveries(active_client, bots, since_date, until_date, ci_status)
+            discoveries = _iter_discoveries(
+                active_client,
+                bots,
+                since_date,
+                until_date,
+                window_days=window_days,
+                pages_per_window=pages_per_window,
+                ci_status=ci_status,
+                dependabot_label=dependabot_label,
+            )
             for item in discoveries:
                 case_id = f"{item.repo}#{item.number}"
                 if case_id in seen:

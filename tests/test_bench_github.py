@@ -228,7 +228,7 @@ def test_search_requests_are_throttled(tmp_path: Path) -> None:
     client.get_json(first)
     client.get_json(second)
 
-    assert sleeps == [2.0]
+    assert sleeps == [3.0]
 
 
 def test_job_log_redirect_has_no_authorization_header(tmp_path: Path) -> None:
