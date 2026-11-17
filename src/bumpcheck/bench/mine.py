@@ -42,6 +42,7 @@ from bumpcheck.bench.titles import (
     ParsedTitle,
     TitleResult,
     classify_title,
+    is_bot_commit,
     loose_version_match,
 )
 from bumpcheck.lockdiff import LockParseError, parse_lock_pair
@@ -617,6 +618,8 @@ def _later_fixes(
         for raw in payload:
             fix = _commit_from_payload(raw)
             if fix is None:
+                continue
+            if is_bot_commit(fix.message):
                 continue
             if merge_commit_sha is not None and fix.sha == merge_commit_sha:
                 continue

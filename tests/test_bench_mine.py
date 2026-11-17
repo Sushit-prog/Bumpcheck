@@ -1225,6 +1225,23 @@ def test_later_fixes_skip_merge_and_non_after_commits(tmp_path: Path) -> None:
     assert [fix["sha"] for fix in candidate["later_fix_commits"]] == ["fix123"]
 
 
+def test_later_fixes_skip_bot_update_commits(tmp_path: Path) -> None:
+    commits = [
+        _commit("bot1", "Update dependency requests to v2.32.0", "2026-01-06T00:00:00Z"),
+        _commit("bot2", "chore(deps): bump requests to 2.32.0", "2026-01-06T00:00:00Z"),
+        _commit(
+            "bot3",
+            "Merge pull request #2 from acme/renovate/requests",
+            "2026-01-06T00:00:00Z",
+        ),
+        _commit("fix123", "Fix requests import", "2026-01-06T00:00:00Z"),
+    ]
+    fake = FakeGitHub(check_runs=[FAILURE_CHECK], commits=commits)
+    candidate, _ = _candidate(tmp_path, fake)
+
+    assert [fix["sha"] for fix in candidate["later_fix_commits"]] == ["fix123"]
+
+
 def test_log_status_unavailable_without_job_id(tmp_path: Path) -> None:
     statuses = [{"context": "tests", "state": "failure", "target_url": "https://ci/tests"}]
     candidate, _ = _candidate(tmp_path, FakeGitHub(check_runs=[], statuses=statuses), logs=True)

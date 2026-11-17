@@ -4,6 +4,7 @@ import pytest
 
 from bumpcheck.bench.titles import (
     classify_title,
+    is_bot_commit,
     loose_version_match,
     parse_dependabot_title,
     parse_renovate_title,
@@ -206,3 +207,26 @@ def test_dependabot_group_across_is_single_package() -> None:
 )
 def test_loose_version_match(title_version: str, bump_version: str | None, expected: bool) -> None:
     assert loose_version_match(title_version, bump_version) is expected
+
+
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        ("Update dependency black to v26", True),
+        ("Bump requests from 2.31.0 to 2.32.0", True),
+        ("chore(deps): update dependency isort to v5", True),
+        ("fix(deps): bump requests", True),
+        ("build(deps): bump foo", True),
+        ("Configure Renovate", True),
+        ("Merge pull request #123 from acme/renovate/pip", True),
+        ("Merge pull request #123 from dependabot/npm/foo", True),
+        ("Merge branch 'renovate/pip' into main", True),
+        ("Merge branch dependabot/go_modules/x", True),
+        ("Fix requests import", False),
+        ("Merge pull request #123 from acme/feature", False),
+        ("Merge branch 'feature/fix' into main", False),
+        ("Updated docs for the API", False),
+    ],
+)
+def test_is_bot_commit(message: str, expected: bool) -> None:
+    assert is_bot_commit(message) is expected

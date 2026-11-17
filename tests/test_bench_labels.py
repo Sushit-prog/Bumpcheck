@@ -13,10 +13,13 @@ from pydantic import ValidationError
 from typer.testing import CliRunner
 
 from bumpcheck.bench.labels import (
+    EVIDENCE_KINDS,
+    LOG_EXPIRY_NOTE,
     Label,
     _default_output,
     compute_agreement,
     compute_stats,
+    format_case,
     load_labels,
     run_label_loop,
     save_label,
@@ -548,3 +551,126 @@ def test_corrupt_labels_line_names_line_number_without_traceback(tmp_path: Path)
     assert result.exit_code == 2
     assert "labels.jsonl line 3" in result.output
     assert "Traceback" not in result.output
+
+
+def test_display_shows_job_links_for_failing_checks() -> None:
+    text = format_case(
+        _candidate(
+            ci_checks=[
+                {"name": "tests", "conclusion": "failure", "html_url": "https://ci/tests"},
+                {"name": "build", "conclusion": "timed_out", "html_url": "https://ci/build"},
+                {"name": "lint", "conclusion": "action_required", "html_url": "https://ci/lint"},
+                {"name": "docs", "conclusion": "success", "html_url": "https://ci/docs"},
+            ]
+        )
+    )
+    assert "    html_url: https://ci/tests" in text
+    assert "    html_url: https://ci/build" in text
+    assert "    html_url: https://ci/lint" in text
+    assert "https://ci/docs" not in text
+
+
+@pytest.mark.parametrize(
+    ("merged_at", "expected"),
+    [
+        ("2025-12-14T10:00:00Z", True),
+        ("2025-12-15T10:00:00Z", False),
+        ("2026-01-05T10:00:00Z", False),
+        (None, False),
+    ],
+)
+def test_log_expiry_note_depends_on_merged_at(merged_at: str | None, expected: bool) -> None:
+    text = format_case(
+        _candidate(
+            merged=merged_at is not None,
+            merged_at=merged_at,
+            ci_checks=[{"name": "tests", "conclusion": "failure", "html_url": "https://ci/tests"}],
+            failure_excerpts=[{"check_name": "tests", "log_status": "unavailable", "lines": []}],
+        ),
+        today=lambda: FIXED,
+    )
+    assert (LOG_EXPIRY_NOTE in text) is expected
+
+
+def test_log_expiry_note_only_for_unavailable_logs() -> None:
+    text = format_case(
+        _candidate(
+            merged_at="2025-01-05T10:00:00Z",
+            failure_excerpts=[
+                {"check_name": "tests", "log_status": "fetched_no_match", "lines": []}
+            ],
+        ),
+        today=lambda: FIXED,
+    )
+    assert LOG_EXPIRY_NOTE not in text
+
+
+def test_display_hides_bot_later_fix_commits(tmp_path: Path) -> None:
+    directory = _setup(
+        tmp_path,
+        [
+            _candidate(
+                later_fix_commits=[
+                    {
+                        "sha": "bot1",
+                        "date": "2026-01-06",
+                        "message": "Update dependency requests to v2.32.0",
+                    },
+                    {
+                        "sha": "fix1",
+                        "date": "2026-01-07",
+                        "message": "Fix requests import",
+                    },
+                    {
+                        "sha": "bot2",
+                        "date": "2026-01-08",
+                        "message": "Merge pull request #2 from acme/renovate/requests",
+                    },
+                ]
+            )
+        ],
+    )
+    output, _ = _run_loop(directory, ["q"])
+    text = _text(output)
+    assert "fix1 2026-01-07 Fix requests import" in text
+    assert "bot1" not in text
+    assert "bot2" not in text
+    assert "2 later commit(s) look like bot updates (hidden)" in text
+
+
+def test_pypi_metadata_evidence_kind_is_supported_and_old_labels_load(tmp_path: Path) -> None:
+    path = tmp_path / "labels.jsonl"
+    legacy = {
+        "case_id": "acme/widgets#9",
+        "round": 1,
+        "label": "BROKE",
+        "break_category": "api_break",
+        "evidence_kind": "log_names_package",
+        "evidence": "ImportError: requests.legacy",
+        "labeled_on": "2025-01-01",
+    }
+    path.write_text(json.dumps(legacy) + "\n", encoding="utf-8")
+    assert load_labels(path)[("acme/widgets#9", 1)].evidence_kind == "log_names_package"
+
+    current = _label(
+        "acme/widgets#1",
+        1,
+        "BROKE",
+        evidence_kind="pypi_metadata",
+        evidence="Requires-Python >=3.11",
+    )
+    records, _ = save_label(path, current)
+    assert load_labels(path)[("acme/widgets#1", 1)].evidence_kind == "pypi_metadata"
+    assert "pypi_metadata" in EVIDENCE_KINDS
+    assert compute_stats({}, records)["evidence_kinds"]["pypi_metadata"] == 1
+
+
+def test_pypi_metadata_is_offered_in_the_broke_prompt(tmp_path: Path) -> None:
+    directory = _setup(tmp_path, [_candidate()])
+    _, script = _run_loop(
+        directory,
+        ["b", "api_break", "pypi_metadata", "Requires-Python >=3.11", "", "", "q"],
+    )
+    assert any("pypi_metadata" in prompt for prompt in script.prompts)
+    stored = load_labels(directory / "labels.jsonl")[("acme/widgets#1", 1)]
+    assert stored.evidence_kind == "pypi_metadata"

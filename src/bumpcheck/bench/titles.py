@@ -27,6 +27,16 @@ _RENOVATE_RE = re.compile(
 
 _DECORATION_RE = re.compile(r"(?:\s*-\s*autoclosed|\s*\[[^\]]*\]|\s*\([^)]*\))\s*$")
 
+_BOT_UPDATE_RE = re.compile(
+    r"^(?:Update\b|Bump\b|Configure\b|(?:chore|fix|build)\(deps\)(?=[\s:(!]|$))",
+    re.IGNORECASE,
+)
+_MERGE_PR_BOT_RE = re.compile(
+    r"^Merge pull request #\d+ from (?:[^/\s]+/)?(?:renovate|dependabot)/",
+    re.IGNORECASE,
+)
+_MERGE_BRANCH_BOT_RE = re.compile(r"^Merge branch\b.*\b(?:renovate|dependabot)/", re.IGNORECASE)
+
 _GROUP_MARKERS = (
     re.compile(r"\bbump\s+the\s+.+\s+group\b", re.IGNORECASE),
     re.compile(r"\bwith\s+\d+\s+updates?\b", re.IGNORECASE),
@@ -59,6 +69,15 @@ class TitleResult:
 
     parsed: ParsedTitle | None
     reason: Literal["group_bump", "not_single_package"] | None = None
+
+
+def is_bot_commit(message: str) -> bool:
+    """Return True for dependency-bot commit subjects."""
+    subject = message.strip().splitlines()[0] if message.strip() else ""
+    return any(
+        pattern.search(subject)
+        for pattern in (_BOT_UPDATE_RE, _MERGE_PR_BOT_RE, _MERGE_BRANCH_BOT_RE)
+    )
 
 
 def parse_dependabot_title(title: str) -> ParsedTitle | None:

@@ -271,8 +271,9 @@ atomically after every label. `BROKE` requires a `break_category`, an
 `evidence_kind`, and non-empty evidence tying the failure to the **bumped
 package**: an error naming its symbols (`log_names_package`), an install error
 for it (`install_error`), a maintainer fix in a later commit
-(`maintainer_fix`), or a local reproduction (`reproduced_locally`). A failing
-check alone is never enough. A failure already present on the base commit is
+(`maintainer_fix`), a local reproduction (`reproduced_locally`), or
+`Requires-Python`/dependency metadata from the new release (`pypi_metadata`).
+A failing check alone is never enough. A failure already present on the base commit is
 `EXCLUDE` with `preexisting_failure`, not `BROKE`. `OK` is only allowed for a
 merged PR whose `ci_summary` is `all_passed`; closed-unmerged and `autoclosed`
 PRs can never be `OK` and are normally `EXCLUDE` (`superseded`) or `BROKE` with

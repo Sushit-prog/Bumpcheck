@@ -8,18 +8,25 @@ import random
 import sys
 from collections import Counter
 from collections.abc import Callable, Iterable
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, ValidationError, field_validator, model_validator
+
+from bumpcheck.bench.titles import is_bot_commit
 
 LabelValue = Literal["BROKE", "OK", "EXCLUDE"]
 BreakCategory = Literal[
     "api_break", "python_version_support", "dependency_conflict", "behavioral", "other"
 ]
 EvidenceKind = Literal[
-    "log_names_package", "install_error", "maintainer_fix", "reproduced_locally", "other"
+    "log_names_package",
+    "install_error",
+    "maintainer_fix",
+    "reproduced_locally",
+    "pypi_metadata",
+    "other",
 ]
 ExcludeReason = Literal[
     "flaky_or_infra", "preexisting_failure", "not_attributable", "superseded", "other"
@@ -37,6 +44,7 @@ EVIDENCE_KINDS: tuple[str, ...] = (
     "install_error",
     "maintainer_fix",
     "reproduced_locally",
+    "pypi_metadata",
     "other",
 )
 EXCLUDE_REASONS: tuple[str, ...] = (
@@ -47,6 +55,8 @@ EXCLUDE_REASONS: tuple[str, ...] = (
     "other",
 )
 LABEL_VALUES: tuple[str, ...] = ("BROKE", "OK", "EXCLUDE")
+FAILING_CONCLUSIONS: frozenset[str] = frozenset({"failure", "timed_out", "action_required"})
+LOG_EXPIRY_NOTE = "logs likely expired (GitHub keeps Actions logs at most 90 days)"
 
 
 class Label(BaseModel):
@@ -273,7 +283,22 @@ def _default_output(message: str) -> None:
             stream.write(encoded.decode(encoding, errors="replace"))
 
 
-def format_case(candidate: dict[str, Any], *, show_suggestion: bool = False) -> str:
+def _logs_likely_expired(merged_at: object, today: date) -> bool:
+    if not isinstance(merged_at, str) or not merged_at.strip():
+        return False
+    try:
+        merged_date = date.fromisoformat(merged_at.strip()[:10])
+    except ValueError:
+        return False
+    return today - merged_date > timedelta(days=90)
+
+
+def format_case(
+    candidate: dict[str, Any],
+    *,
+    show_suggestion: bool = False,
+    today: Callable[[], date] = date.today,
+) -> str:
     """Render one candidate; never include stored labels from any round."""
     number = candidate.get("pr_number", "?")
     lines = [
@@ -293,18 +318,31 @@ def format_case(candidate: dict[str, Any], *, show_suggestion: bool = False) -> 
         lines.append(f"label_suggestion: {candidate.get('label_suggestion', '')}")
     lines.append("ci_checks:")
     for check in candidate.get("ci_checks") or []:
-        lines.append(f"  {check.get('name')}: {check.get('conclusion')}")
+        conclusion = str(check.get("conclusion") or "")
+        lines.append(f"  {check.get('name')}: {conclusion}")
+        if conclusion.lower() in FAILING_CONCLUSIONS:
+            url = check.get("html_url")
+            if isinstance(url, str) and url:
+                lines.append(f"    html_url: {url}")
     lines.append("failure_vs_base:")
     for entry in candidate.get("failure_vs_base") or []:
         lines.append(f"  {entry.get('name')}: {entry.get('status')}")
     lines.append("failure_excerpts:")
+    expired = _logs_likely_expired(candidate.get("merged_at"), today())
     for excerpt in candidate.get("failure_excerpts") or []:
         lines.append(f"  {excerpt.get('check_name')} ({excerpt.get('log_status')}):")
+        if excerpt.get("log_status") == "unavailable" and expired:
+            lines.append(f"    {LOG_EXPIRY_NOTE}")
         for line in excerpt.get("lines") or []:
             lines.append(f"    {line}")
     lines.append("later_fix_commits:")
-    for fix in candidate.get("later_fix_commits") or []:
+    commits = candidate.get("later_fix_commits") or []
+    visible = [fix for fix in commits if not is_bot_commit(str(fix.get("message") or ""))]
+    for fix in visible:
         lines.append(f"  {fix.get('sha')} {fix.get('date')} {fix.get('message')}")
+    hidden = len(commits) - len(visible)
+    if hidden:
+        lines.append(f"{hidden} later commit(s) look like bot updates (hidden)")
     base_checks = candidate.get("base_ci_checks")
     if isinstance(base_checks, list):
         lines.append(f"base_ci: available ({len(base_checks)} check(s))")
@@ -420,7 +458,7 @@ def run_label_loop(
         for case_id in case_ids:
             candidate = candidates[case_id]
             output("")
-            output(format_case(candidate, show_suggestion=show_suggestion))
+            output(format_case(candidate, show_suggestion=show_suggestion, today=today))
             try:
                 while True:
                     try:
