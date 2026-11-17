@@ -125,6 +125,55 @@ no direct usages that match them. It covers API signatures and direct static
 usage only. It does not prove behavioral compatibility, transitive breakage,
 runtime-only imports, or usage reached through untraced instance flow.
 
+## Benchmark
+
+Mine public Dependabot and Renovate pull requests into hand-labellable
+candidates:
+
+```
+uv run bumpcheck bench mine --out bench/v0-candidates --bot both \
+  --since 2026-01-01 --limit 60 --logs
+```
+
+The miner searches GitHub for closed single-package bump PRs in Python
+projects, keeps only PRs whose before/after lockfile parser output matches a
+single bumped package named in the title, and records the CI outcome for the
+head commit. It writes three files to `--out`:
+
+- `candidates.jsonl`: one candidate per line, sorted by `case_id`. Every
+  candidate has a null `label` field, ready for hand labelling.
+- `excluded.jsonl`: every inspected PR that was rejected, with a reason:
+  `group_bump`, `not_single_package`, `no_supported_lockfile`,
+  `parse_mismatch`, `no_ci`, `ci_not_attributable`,
+  `closed_without_ci_signal`, or `other`.
+- `summary.json`: counts per label suggestion, bot, split and exclusion
+  reason, plus distinct repos and API calls made.
+
+CI outcomes are noisy suggestions, not labels. `OK_SUSPECT` means every
+signal-bearing check passed on a merged PR, `BROKE_SUSPECT` means at least one
+non-lint check failed, and `UNCLEAR` covers everything else (for example a
+passing PR that was closed without merging). Cancelled, skipped, neutral and
+stale conclusions are ignored; PRs with pending checks are excluded. Every
+candidate still needs hand verification.
+
+Responses are cached under `.bumpcheck-cache/github/` (override with
+`--cache-dir`), and `--offline` replays a warm cache without touching the
+network. `GITHUB_TOKEN` is optional but required for `--logs` and for usable
+rate limits; it is never written to the cache or to any output file. Requests are
+spaced at least 1 second apart (search at least 2), and rate-limit 403/429
+responses are retried with the API's own retry hint (or a doubling backoff, up
+to four retries) before failing with the API's message. Rerunning
+into the same `--out` skips cases that are already recorded; `--limit` counts
+those earlier candidates too.
+
+The `dev`/`test` split is assigned deterministically per repository
+(`sha256(repo)` first byte below 77 means `test`, about 30%), so reruns and
+resumed runs keep the same split and no PR leaks between splits. Discovery walks
+one-month windows in ascending order and processes each search page as it
+arrives, so `--limit` stops pagination early; a window is split in half whenever
+GitHub's 1000-result search cap is hit, and a single day with more than 1000
+matches is still truncated by GitHub and cannot be paged further.
+
 ## Acceptance run
 
 Check the API diff against known breaking releases listed in

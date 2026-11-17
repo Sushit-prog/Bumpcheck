@@ -8,20 +8,19 @@ from __future__ import annotations
 
 import argparse
 import datetime
-import fnmatch
 import json
 import os
-import re
 import time
 import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass
 from pathlib import Path
 
 from packaging.utils import canonicalize_name
 
+from bumpcheck.bench.lockfiles import lockfile_kind, select_lockfiles
+from bumpcheck.bench.titles import parse_dependabot_title
 from bumpcheck.lockdiff import LockParseError, parse_lock_pair
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -36,23 +35,7 @@ USER_AGENT = "bumpcheck-realworld/0.1"
 MAX_FILES = 300
 PAGE_SIZE = 100
 REQUEST_SLEEP = 0.5
-REQUIREMENTS_GLOB = "requirements*.txt"
 TOP_EXTRA_BUMPS = 10
-
-_TITLE_RE = re.compile(
-    r"^(?:(?P<prefix>[A-Za-z]+)\(deps[^)]*\):?\s+)?"
-    r"[Bb]ump\s+(?P<name>\S+)\s+from\s+(?P<old>\S+)\s+to\s+(?P<new>\S+)"
-    r"(?:\s+in\s+the\s+(?P<group>\S+)\s+group\s+across\s+\d+\s+director(?:y|ies))?"
-    r"(?:\s+in\s+(?P<path>\S+))?\s*$"
-)
-
-
-@dataclass(frozen=True)
-class DependabotTitle:
-    name: str
-    old_version: str
-    new_version: str
-    path: str | None = None
 
 
 class RateLimited(Exception):
@@ -78,40 +61,6 @@ def parse_pr_url(url: str) -> tuple[str, str, int]:
     if not number_text.isdigit():
         raise ValueError(f"invalid pull request number in {url!r}")
     return owner, repo, int(number_text)
-
-
-def _basename(path: str) -> str:
-    return path.replace("\\", "/").rsplit("/", 1)[-1]
-
-
-def lockfile_kind(path: str) -> str | None:
-    """Return the parser kind for a repo path, or None if it is not a lockfile."""
-    basename = _basename(path)
-    if basename == "uv.lock":
-        return "uv.lock"
-    if basename == "poetry.lock":
-        return "poetry.lock"
-    if fnmatch.fnmatchcase(basename, REQUIREMENTS_GLOB):
-        return "requirements"
-    return None
-
-
-def select_lockfiles(files: list[dict]) -> list[dict]:
-    """Keep only the changed files that are lockfiles, preserving order."""
-    return [entry for entry in files if lockfile_kind(str(entry.get("filename", ""))) is not None]
-
-
-def parse_dependabot_title(title: str) -> DependabotTitle | None:
-    """Parse a Dependabot bump title, or return None for other titles."""
-    match = _TITLE_RE.match(title.strip())
-    if match is None:
-        return None
-    return DependabotTitle(
-        name=match.group("name"),
-        old_version=match.group("old"),
-        new_version=match.group("new"),
-        path=match.group("path"),
-    )
 
 
 def _headers(token: str | None) -> dict[str, str]:

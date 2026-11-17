@@ -21,6 +21,8 @@ htmlcov/
 .uv/
 uv.toml
 
+.bumpcheck-cache/
+
 realworld/data/
 realworld/report.*
 
