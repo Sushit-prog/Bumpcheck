@@ -147,10 +147,23 @@ head commit. It writes three files to `--out`:
   `no_supported_lockfile`, `parse_mismatch`, `no_ci`,
   `ci_not_attributable`, `closed_without_ci_signal`, `noise_repo`,
   `repo_cap`, or `other`. Each record keeps the PR title so rejections can be
-  audited.
+  audited, and a short `detail` (at most 200 characters) explains
+  `parse_mismatch` (title vs. lockfile bumps), pending/failing check names for
+  `other`/`ci_not_attributable`, and exception type/message for `other`
+  (URL query strings stripped).
 - `summary.json`: counts per label suggestion, bot, split and exclusion
-  reason, plus distinct repos, API calls (`api_calls`) and search requests
-  (`search_calls`).
+  reason, plus distinct repos, API calls (`api_calls`), search requests
+  (`search_calls`), and the `retried`/`recovered` counters from
+  `--retry-excluded`.
+
+Single-package bumps carry `autoclosed: true` when the pull request title was
+decorated with `- autoclosed`. Renovate titles are stripped of trailing
+`- autoclosed`, `[SECURITY]`-style tags and `(major)`-style parenthesised
+decorations (repeatedly, never down to an empty title) before parsing.
+Parenthesised text inside the title, such as the `(fork)` in
+`Update dependency foo (fork) to v1`, is left alone. Dependabot's
+`Bump X from A to B in the <group> group across N directories` form is treated
+as a single-package bump, not a group bump.
 
 Discovery walks fixed `--window-days` windows (default 7) from `--since` to
 `--until`, ordered deterministically by the SHA-256 of each window's start
@@ -183,6 +196,21 @@ owner explicitly. Only a leading literal `^` counts: an inline-flag form such
 as `(?i)^skills-` is treated as unanchored and matched against `owner/name`.
 `--ci-status {any,failure,success}` adds GitHub's `status:` qualifier to the
 search and is copied into each candidate's `sampled_by` field.
+
+`--retry-excluded REASON` (repeatable) re-processes stored `excluded.jsonl`
+entries with that reason in a separate pass before discovery, even when
+`--limit` is already met. Retried recoveries can therefore push the kept count
+above `--limit`; discovery only runs when the kept count is still below it.
+Each selected entry is handled in sorted `case_id` order directly from its
+stored `repo` and `pr_number`: a stored title is re-classified without a
+request and the PR is fetched only if it now looks like a single-package bump,
+while a legacy entry without a title first fetches `/pulls/{n}` once to read
+the title and author login (the fetched title is stored even if the entry stays
+excluded). Recovered entries go through the normal per-PR pipeline and move to
+`candidates.jsonl`; anything that fails again is re-excluded with its new
+reason and `detail`. The same noise-repo patterns and `--max-per-repo` cap
+apply, and progress lines are prefixed `[retry]`. Entries not selected by
+`--retry-excluded` are untouched.
 
 CI outcomes are noisy suggestions, not labels. `OK_SUSPECT` means every
 signal-bearing check passed on a merged PR, `BROKE_SUSPECT` means at least one
@@ -227,6 +255,39 @@ instead of exhausting the oldest month first; each search page is still
 fetched lazily, so `--limit` stops early. A window is split in half whenever
 GitHub's 1000-result search cap is hit, and a single day with more than 1000
 matches is still truncated by GitHub and cannot be paged further.
+
+### Labeling rules
+
+Hand-label mined candidates in a store separate from `candidates.jsonl`:
+
+```
+uv run bumpcheck bench label --dir bench/v0-candidates
+uv run bumpcheck bench label-stats --dir bench/v0-candidates
+uv run bumpcheck bench agreement --dir bench/v0-candidates
+```
+
+`labels.jsonl` holds one JSON object per `(case_id, round)`, rewritten
+atomically after every label. `BROKE` requires a `break_category`, an
+`evidence_kind`, and non-empty evidence tying the failure to the **bumped
+package**: an error naming its symbols (`log_names_package`), an install error
+for it (`install_error`), a maintainer fix in a later commit
+(`maintainer_fix`), or a local reproduction (`reproduced_locally`). A failing
+check alone is never enough. A failure already present on the base commit is
+`EXCLUDE` with `preexisting_failure`, not `BROKE`. `OK` is only allowed for a
+merged PR whose `ci_summary` is `all_passed`; closed-unmerged and `autoclosed`
+PRs can never be `OK` and are normally `EXCLUDE` (`superseded`) or `BROKE` with
+evidence. `EXCLUDE` always needs a reason and evidence.
+
+The miner's `label_suggestion` is hidden by default so the reviewer is not
+anchored on its judgement (`--show-suggestion` reveals it). Hiding it mitigates
+anchoring but does not remove it: check conclusions are still displayed and can
+influence the decision. Use `bench label --round 2` at least a week later to
+re-label a random 20% of the round-1 `BROKE`/`OK` cases (`--sample 0.2 --seed
+42`), optionally restricted with `--round1-label BROKE`, then report raw
+agreement and Cohen's kappa from `bench agreement`. `--only` filters by miner
+suggestion, and repeatable `--also-dir DIR` skips case_ids already labeled for
+that round in another store. Labels are never saved for a case already labeled
+in the selected round; re-labeling the same `(case_id, round)` replaces it.
 
 ## Acceptance run
 

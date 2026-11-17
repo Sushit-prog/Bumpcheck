@@ -12,6 +12,13 @@ from packaging.version import InvalidVersion, Version
 from bumpcheck import __version__
 from bumpcheck.apidiff import ApiDiffResult, diff_versions
 from bumpcheck.bench.github import GitHubError
+from bumpcheck.bench.labels import (
+    compute_agreement,
+    compute_stats,
+    load_candidates,
+    load_labels,
+    run_label_loop,
+)
 from bumpcheck.bench.mine import mine as run_mine
 from bumpcheck.check import check as run_check
 from bumpcheck.check import format_text
@@ -47,6 +54,17 @@ class CIStatusChoice(str, Enum):
     ANY = "any"
     FAILURE = "failure"
     SUCCESS = "success"
+
+
+class OnlySuggestionChoice(str, Enum):
+    BROKE_SUSPECT = "BROKE_SUSPECT"
+    OK_SUSPECT = "OK_SUSPECT"
+    UNCLEAR = "UNCLEAR"
+
+
+class Round1LabelChoice(str, Enum):
+    BROKE = "BROKE"
+    OK = "OK"
 
 
 def _version_callback(value: bool) -> None:
@@ -327,6 +345,14 @@ def bench_mine(
         "--dependabot-label",
         help='Label appended to Dependabot search queries; pass "" to disable.',
     ),
+    retry_excluded: list[str] | None = typer.Option(
+        None,
+        "--retry-excluded",
+        help=(
+            "Re-process stored exclusions with this reason before discovery; "
+            "repeatable. Retried recoveries can push the kept count above --limit."
+        ),
+    ),
     logs: bool = typer.Option(
         False,
         "--logs",
@@ -367,9 +393,123 @@ def bench_mine(
             window_days=window_days,
             pages_per_window=pages_per_window,
             dependabot_label=dependabot_label,
+            retry_excluded=retry_excluded,
         )
     except (GitHubError, ValueError) as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=2) from exc
     if code:
         raise typer.Exit(code=code)
+
+
+@bench_app.command("label")
+def bench_label(
+    dir: Path = typer.Option(
+        ...,
+        "--dir",
+        help="Directory containing candidates.jsonl and labels.jsonl.",
+    ),
+    round: int = typer.Option(1, "--round", help="Review round (1 or greater)."),
+    only: OnlySuggestionChoice | None = typer.Option(
+        None,
+        "--only",
+        help="Only show cases with this miner suggestion.",
+    ),
+    sample: float | None = typer.Option(
+        None,
+        "--sample",
+        help="Show this fraction of selected cases (with --seed).",
+    ),
+    seed: int = typer.Option(0, "--seed", help="Seed for --sample."),
+    show_suggestion: bool = typer.Option(
+        False,
+        "--show-suggestion",
+        help="Reveal the miner's label_suggestion (hidden by default).",
+    ),
+    also_dir: list[Path] | None = typer.Option(
+        None,
+        "--also-dir",
+        help="Skip case_ids already labeled for this round in another directory; repeatable.",
+    ),
+    round1_label: Round1LabelChoice | None = typer.Option(
+        None,
+        "--round1-label",
+        help="For round 2+, restrict the pool to this round-1 label.",
+    ),
+) -> None:
+    """Hand-label mined candidates as BROKE, OK or EXCLUDE."""
+    try:
+        code = run_label_loop(
+            dir,
+            round=round,
+            only=only.value if only is not None else None,
+            sample=sample,
+            seed=seed,
+            show_suggestion=show_suggestion,
+            also_dirs=also_dir,
+            round1_label=round1_label.value if round1_label is not None else None,
+        )
+    except (ValueError, OSError) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+    if code:
+        raise typer.Exit(code=code)
+
+
+@bench_app.command("label-stats")
+def bench_label_stats(
+    dir: Path = typer.Option(
+        ...,
+        "--dir",
+        help="Directory containing candidates.jsonl and labels.jsonl.",
+    ),
+) -> None:
+    """Print labeling counts by round and evidence category."""
+    try:
+        candidates = load_candidates(dir / "candidates.jsonl")
+        labels = load_labels(dir / "labels.jsonl")
+    except (ValueError, OSError) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+    stats = compute_stats(candidates, labels)
+    for number, counts in stats["rounds"].items():
+        typer.echo(
+            f"round {number}: " + " ".join(f"{name}={count}" for name, count in counts.items())
+        )
+    for heading, key in (
+        ("break_category", "break_categories"),
+        ("evidence_kind", "evidence_kinds"),
+        ("exclude_reason", "exclude_reasons"),
+    ):
+        counts = stats[key]
+        typer.echo(f"{heading}: " + " ".join(f"{name}={count}" for name, count in counts.items()))
+    typer.echo(f"unlabeled in round 1: {stats['unlabeled_round_1']}")
+
+
+@bench_app.command("agreement")
+def bench_agreement(
+    dir: Path = typer.Option(
+        ...,
+        "--dir",
+        help="Directory containing labels.jsonl.",
+    ),
+) -> None:
+    """Report round 1 vs round 2 agreement on BROKE/OK labels."""
+    try:
+        result = compute_agreement(load_labels(dir / "labels.jsonl"))
+    except (ValueError, OSError) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+    typer.echo(f"N: {result['n']}")
+    typer.echo("round 1 \\ round 2   BROKE   OK")
+    for first in ("BROKE", "OK"):
+        matrix = result["matrix"]
+        typer.echo(f"{first:8}  {matrix[(first, 'BROKE')]:7} {matrix[(first, 'OK')]:4}")
+    raw = result["raw_agreement"]
+    kappa = result["kappa"]
+    raw_text = "n/a" if raw is None else f"{raw:.3f}"
+    kappa_text = "n/a" if kappa is None else f"{kappa:.3f}"
+    typer.echo(f"raw agreement: {raw_text}")
+    typer.echo(f"cohen's kappa: {kappa_text}")
+    typer.echo("disagreeing: " + (", ".join(result["disagreeing_case_ids"]) or "none"))
+    typer.echo("EXCLUDE disagreements: " + (", ".join(result["exclude_disagreements"]) or "none"))

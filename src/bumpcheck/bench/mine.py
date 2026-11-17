@@ -18,7 +18,7 @@ from collections import Counter
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from typing import cast, get_args
 
 from packaging.utils import canonicalize_name
 
@@ -37,7 +37,13 @@ from bumpcheck.bench.models import (
     LaterFix,
     Summary,
 )
-from bumpcheck.bench.titles import Bot, classify_title, loose_version_match
+from bumpcheck.bench.titles import (
+    Bot,
+    ParsedTitle,
+    TitleResult,
+    classify_title,
+    loose_version_match,
+)
 from bumpcheck.lockdiff import LockParseError, parse_lock_pair
 
 PAGE_SIZE = 100
@@ -244,13 +250,42 @@ def _iter_discoveries(
             )
 
 
-def _excluded(item: SearchItem, reason: ExcludedReason, title: str | None = None) -> Excluded:
+def _excluded(
+    item: SearchItem,
+    reason: ExcludedReason,
+    title: str | None = None,
+    detail: str = "",
+) -> Excluded:
     return Excluded(
         case_id=f"{item.repo}#{item.number}",
         repo=item.repo,
         pr_number=item.number,
         title=title or item.title,
         reason=reason,
+        detail=_detail(detail),
+    )
+
+
+def _detail(text: str) -> str:
+    return text if len(text) <= 200 else text[:197] + "..."
+
+
+_URL_QUERY_RE = re.compile(r"(https?://[^\s?#]+)\?[^\s]*")
+
+
+def _exception_detail(exc: BaseException) -> str:
+    message = _URL_QUERY_RE.sub(r"\1", str(exc))
+    return _detail(f"{type(exc).__name__}: {message}")
+
+
+def _mismatch_detail(parsed: ParsedTitle, bumps: set[tuple[str, str | None, str | None]]) -> str:
+    found = ", ".join(
+        f"{package} {old_version or '?'}->{new_version or '?'}"
+        for package, old_version, new_version in sorted(bumps)
+    )
+    return _detail(
+        f"title: {parsed.name} {parsed.old_version or '?'}->{parsed.new_version}; "
+        f"lockfile bumps: {found or 'none'}"
     )
 
 
@@ -396,12 +431,12 @@ def _collect_base_checks(client: GitHubClient, base_url: str, base_sha: str) -> 
 
 def _collect_checks(
     client: GitHubClient, base_url: str, head_sha: str
-) -> tuple[list[_Check], bool, bool]:
+) -> tuple[list[_Check], bool, list[str]]:
     runs = _fetch_check_runs(client, base_url, head_sha)
     by_name = _runs_by_name(runs)
 
     checks: list[_Check] = []
-    pending = False
+    pending: list[str] = []
     flaky = False
     for name in sorted(by_name):
         attempts = by_name[name]
@@ -409,7 +444,7 @@ def _collect_checks(
         status = str(latest.get("status") or "")
         conclusion = latest.get("conclusion")
         if status in PENDING_STATES or conclusion is None:
-            pending = True
+            pending.append(name)
             continue
         conclusion = str(conclusion)
         earlier_failed = any(
@@ -443,7 +478,7 @@ def _collect_checks(
             continue
         state = str(raw.get("state") or "")
         if state == "pending":
-            pending = True
+            pending.append(context)
             continue
         conclusion = _conclusion_from_state(state)
         if conclusion in NON_SIGNAL_CONCLUSIONS:
@@ -599,7 +634,12 @@ def _later_fixes(
 
 
 def _mine_case(
-    client: GitHubClient, item: SearchItem, *, logs: bool, ci_status: CIStatus = "any"
+    client: GitHubClient,
+    item: SearchItem,
+    *,
+    logs: bool,
+    ci_status: CIStatus = "any",
+    pr: dict | None = None,
 ) -> Candidate | Excluded:
     owner, _, name = item.repo.partition("/")
     base_url = f"{github.API_ROOT}/repos/{owner}/{name}"
@@ -610,10 +650,12 @@ def _mine_case(
     title_result = classify_title(item.title, cast(Bot, bot))
     if title_result.parsed is None:
         return _excluded(item, title_result.reason or "other")
+    autoclosed = title_result.parsed.autoclosed
     if _is_non_python_package(title_result.parsed.name):
         return _excluded(item, "non_python_package")
 
-    pr = client.get_json(f"{base_url}/pulls/{item.number}")
+    if pr is None:
+        pr = client.get_json(f"{base_url}/pulls/{item.number}")
     if not isinstance(pr, dict):
         return _excluded(item, "other")
     title = pr.get("title") if isinstance(pr.get("title"), str) else item.title
@@ -621,6 +663,7 @@ def _mine_case(
         title_result = classify_title(title, cast(Bot, bot))
         if title_result.parsed is None:
             return _excluded(item, title_result.reason or "other", title=title)
+        autoclosed = autoclosed or title_result.parsed.autoclosed
         if _is_non_python_package(title_result.parsed.name):
             return _excluded(item, "non_python_package", title=title)
     parsed = title_result.parsed
@@ -679,27 +722,31 @@ def _mine_case(
         return _excluded(item, "other")
 
     if len(bumps) != 1:
-        return _excluded(item, "parse_mismatch")
+        return _excluded(item, "parse_mismatch", detail=_mismatch_detail(parsed, bumps))
     package, old_version, new_version = next(iter(bumps))
     if package != canonicalize_name(parsed.name) or new_version is None:
-        return _excluded(item, "parse_mismatch")
+        return _excluded(item, "parse_mismatch", detail=_mismatch_detail(parsed, bumps))
     if bot == "dependabot":
         if old_version != parsed.old_version or new_version != parsed.new_version:
-            return _excluded(item, "parse_mismatch")
+            return _excluded(item, "parse_mismatch", detail=_mismatch_detail(parsed, bumps))
     else:
         if not loose_version_match(parsed.new_version, new_version):
-            return _excluded(item, "parse_mismatch")
+            return _excluded(item, "parse_mismatch", detail=_mismatch_detail(parsed, bumps))
         if parsed.old_version is not None and old_version != parsed.old_version:
-            return _excluded(item, "parse_mismatch")
+            return _excluded(item, "parse_mismatch", detail=_mismatch_detail(parsed, bumps))
 
     checks, flaky, pending = _collect_checks(client, base_url, head_sha)
     if pending:
-        return _excluded(item, "other")
+        return _excluded(item, "other", detail="pending checks: " + ", ".join(pending))
     if not checks:
         return _excluded(item, "closed_without_ci_signal" if not merged else "no_ci")
     failed = [check for check in checks if check.conclusion in FAILURE_CONCLUSIONS]
     if failed and all(NON_BUMP_CHECK_RE.search(check.name) for check in failed):
-        return _excluded(item, "ci_not_attributable")
+        return _excluded(
+            item,
+            "ci_not_attributable",
+            detail="failing checks: " + ", ".join(check.name for check in failed),
+        )
 
     ci_summary = "some_failed" if failed else "all_passed"
     base_checks: list[CheckRef] = []
@@ -767,6 +814,7 @@ def _mine_case(
         split=_split_for(item.repo),
         rerun_flaky=flaky,
         sampled_by=ci_status,
+        autoclosed=autoclosed,
     )
 
 
@@ -788,12 +836,133 @@ def _compare_failures(failed: list[_Check], base_checks: list[CheckRef]) -> list
 
 
 def _mine_safely(
-    client: GitHubClient, item: SearchItem, *, logs: bool, ci_status: CIStatus = "any"
+    client: GitHubClient,
+    item: SearchItem,
+    *,
+    logs: bool,
+    ci_status: CIStatus = "any",
+    pr: dict | None = None,
 ) -> Candidate | Excluded:
     try:
-        return _mine_case(client, item, logs=logs, ci_status=ci_status)
-    except HttpStatusError:
+        return _mine_case(client, item, logs=logs, ci_status=ci_status, pr=pr)
+    except GitHubError as exc:
+        return _excluded(item, "other", detail=_exception_detail(exc))
+
+
+def _stored_title_result(title: str) -> tuple[TitleResult, Bot] | None:
+    for bot in cast(tuple[Bot, Bot], ("dependabot", "renovate")):
+        result = classify_title(title, bot)
+        if result.parsed is not None:
+            return result, bot
+    return None
+
+
+def _retry_result(
+    client: GitHubClient,
+    repo: str,
+    number: int,
+    title: str,
+    *,
+    logs: bool,
+    ci_status: CIStatus,
+) -> Candidate | Excluded:
+    item = SearchItem(repo=repo, number=number, title=title, login="", created_at="")
+    if title:
+        classified = _stored_title_result(title)
+        if classified is None:
+            reason = classify_title(title, "dependabot").reason or "other"
+            return _excluded(item, reason)
+        title_result, bot = classified
+        if title_result.parsed is not None and _is_non_python_package(title_result.parsed.name):
+            return _excluded(item, "non_python_package")
+        item = SearchItem(
+            repo=repo,
+            number=number,
+            title=title,
+            login=f"{bot}[bot]",
+            created_at="",
+        )
+        return _mine_safely(client, item, logs=logs, ci_status=ci_status)
+
+    try:
+        pr = client.get_json(f"{github.API_ROOT}/repos/{repo}/pulls/{number}")
+    except GitHubError as exc:
+        return _excluded(item, "other", detail=_exception_detail(exc))
+    if not isinstance(pr, dict):
         return _excluded(item, "other")
+    fetched = pr.get("title") if isinstance(pr.get("title"), str) else ""
+    item = SearchItem(repo=repo, number=number, title=fetched, login="", created_at="")
+    if not fetched:
+        return _excluded(item, "other")
+    user = pr.get("user")
+    raw_login = user.get("login") if isinstance(user, dict) else None
+    login = raw_login if isinstance(raw_login, str) else ""
+    bot = _bot_from_login(login)
+    if bot is None:
+        return _excluded(item, "other")
+    title_result = classify_title(fetched, cast(Bot, bot))
+    if title_result.parsed is None:
+        return _excluded(item, title_result.reason or "other")
+    if _is_non_python_package(title_result.parsed.name):
+        return _excluded(item, "non_python_package")
+    item = SearchItem(repo=repo, number=number, title=fetched, login=login, created_at="")
+    return _mine_safely(client, item, logs=logs, ci_status=ci_status, pr=pr)
+
+
+def _retry_pass(
+    client: GitHubClient,
+    excluded: dict[str, dict],
+    candidates: dict[str, dict],
+    *,
+    reasons: set[str],
+    logs: bool,
+    ci_status: CIStatus,
+    max_per_repo: int,
+    noise_patterns: list[re.Pattern[str]],
+    repo_counts: Counter[str],
+    candidates_path: Path,
+    excluded_path: Path,
+) -> tuple[int, int]:
+    retried = 0
+    recovered = 0
+    for case_id in sorted(excluded):
+        record = excluded[case_id]
+        if str(record.get("reason", "")) not in reasons:
+            continue
+        repo = str(record.get("repo") or "")
+        number = record.get("pr_number")
+        if not repo or not isinstance(number, int) or isinstance(number, bool):
+            continue
+        retried += 1
+        title = str(record.get("title") or "")
+        item = SearchItem(repo=repo, number=number, title=title, login="", created_at="")
+        result: Candidate | Excluded
+        if _is_noise(repo, noise_patterns):
+            result = _excluded(item, "noise_repo")
+        elif repo_counts[repo] >= max_per_repo:
+            result = _excluded(item, "repo_cap")
+        else:
+            result = _retry_result(
+                client,
+                repo,
+                number,
+                title,
+                logs=logs,
+                ci_status=ci_status,
+            )
+        if isinstance(result, Candidate):
+            candidates[case_id] = result.model_dump()
+            excluded.pop(case_id, None)
+            repo_counts[repo] += 1
+            recovered += 1
+            outcome = f"kept ({result.label_suggestion})"
+        else:
+            excluded[case_id] = result.model_dump()
+            outcome = f"excluded ({result.reason})"
+        _write_jsonl(candidates_path, candidates)
+        _write_jsonl(excluded_path, excluded)
+        print(f"[retry] {case_id} -> {outcome}", file=sys.stderr)
+    return retried, recovered
 
 
 def _load_records(path: Path) -> dict[str, dict]:
@@ -846,7 +1015,12 @@ def _write_jsonl(path: Path, records: dict[str, dict]) -> None:
 
 
 def _build_summary(
-    candidates: dict[str, dict], excluded: dict[str, dict], client: GitHubClient
+    candidates: dict[str, dict],
+    excluded: dict[str, dict],
+    client: GitHubClient,
+    *,
+    retried: int = 0,
+    recovered: int = 0,
 ) -> Summary:
     labels = Counter(str(record.get("label_suggestion", "")) for record in candidates.values())
     reasons = Counter(str(record.get("reason", "")) for record in excluded.values())
@@ -864,13 +1038,21 @@ def _build_summary(
         api_calls=client.api_calls,
         cache_hits=client.cache_hits,
         search_calls=client.search_calls,
+        retried=retried,
+        recovered=recovered,
     )
 
 
 def _write_summary(
-    out: Path, candidates: dict[str, dict], excluded: dict[str, dict], client: GitHubClient
+    out: Path,
+    candidates: dict[str, dict],
+    excluded: dict[str, dict],
+    client: GitHubClient,
+    *,
+    retried: int = 0,
+    recovered: int = 0,
 ) -> Summary:
-    summary = _build_summary(candidates, excluded, client)
+    summary = _build_summary(candidates, excluded, client, retried=retried, recovered=recovered)
     (out / "summary.json").write_text(
         json.dumps(summary.model_dump(), indent=2) + "\n", encoding="utf-8"
     )
@@ -894,6 +1076,7 @@ def mine(
     window_days: int = DEFAULT_WINDOW_DAYS,
     pages_per_window: int = DEFAULT_PAGES_PER_WINDOW,
     dependabot_label: str = DEFAULT_DEPENDABOT_LABEL,
+    retry_excluded: list[str] | None = None,
 ) -> int:
     """Mine candidates into ``out``; returns a process exit code."""
     if bot not in {"dependabot", "renovate", "both"}:
@@ -908,6 +1091,11 @@ def mine(
         raise ValueError("--window-days must be one or greater")
     if not 1 <= pages_per_window <= MAX_PAGES_PER_WINDOW:
         raise ValueError(f"--pages-per-window must be between 1 and {MAX_PAGES_PER_WINDOW}")
+    retry_reasons = set(retry_excluded or ())
+    valid_reasons = set(get_args(ExcludedReason))
+    for reason in sorted(retry_reasons):
+        if reason not in valid_reasons:
+            raise ValueError(f"Unknown --retry-excluded reason: {reason!r}")
 
     until_date = until or dt.date.today()
     since_date = since or (until_date - dt.timedelta(days=DEFAULT_SINCE_DAYS))
@@ -926,10 +1114,30 @@ def mine(
     excluded_path = out / "excluded.jsonl"
     candidates = _load_records(candidates_path)
     excluded = _load_records(excluded_path)
-    seen = set(candidates) | set(excluded)
+    seen = set(candidates)
+    for case_id, record in excluded.items():
+        if str(record.get("reason", "")) not in retry_reasons:
+            seen.add(case_id)
     repo_counts = Counter(str(record.get("repo", "")) for record in candidates.values())
+    retried = 0
+    recovered = 0
 
     try:
+        if retry_reasons:
+            retried, recovered = _retry_pass(
+                active_client,
+                excluded,
+                candidates,
+                reasons=retry_reasons,
+                logs=logs,
+                ci_status=cast(CIStatus, ci_status),
+                max_per_repo=max_per_repo,
+                noise_patterns=noise_patterns,
+                repo_counts=repo_counts,
+                candidates_path=candidates_path,
+                excluded_path=excluded_path,
+            )
+            seen = set(candidates) | set(excluded)
         if len(candidates) < limit:
             bots = ["dependabot", "renovate"] if bot == "both" else [bot]
             discoveries = _iter_discoveries(
@@ -976,7 +1184,14 @@ def mine(
     except KeyboardInterrupt:
         _write_jsonl(candidates_path, candidates)
         _write_jsonl(excluded_path, excluded)
-        _write_summary(out, candidates, excluded, active_client)
+        _write_summary(
+            out,
+            candidates,
+            excluded,
+            active_client,
+            retried=retried,
+            recovered=recovered,
+        )
         print(
             f"interrupted; saved {len(candidates)} candidate(s) and "
             f"{len(excluded)} exclusion(s) to {out}",
@@ -986,7 +1201,14 @@ def mine(
 
     _write_jsonl(candidates_path, candidates)
     _write_jsonl(excluded_path, excluded)
-    summary = _write_summary(out, candidates, excluded, active_client)
+    summary = _write_summary(
+        out,
+        candidates,
+        excluded,
+        active_client,
+        retried=retried,
+        recovered=recovered,
+    )
 
     print(
         f"Mined {summary.kept} candidate(s) and {summary.excluded} exclusion(s) "

@@ -73,6 +73,75 @@ def test_parse_renovate_title(title: str, expected: tuple) -> None:
 
 
 @pytest.mark.parametrize(
+    ("title", "expected", "autoclosed"),
+    [
+        (
+            "Update dependency black to v26 [SECURITY] - autoclosed",
+            ("black", None, "26"),
+            True,
+        ),
+        ("Update dependency mypy to v1.20.2 - autoclosed", ("mypy", None, "1.20.2"), True),
+        (
+            "Update dependency homeassistant to v2025 - autoclosed",
+            ("homeassistant", None, "2025"),
+            True,
+        ),
+        (
+            "chore(deps): update dependency isort to v5.13.2 - autoclosed",
+            ("isort", None, "5.13.2"),
+            True,
+        ),
+        (
+            "chore(deps): update dependency pyright to v1.1.411",
+            ("pyright", None, "1.1.411"),
+            False,
+        ),
+        (
+            "Update dependency flake8 to v7 [Security] (major) - autoclosed",
+            ("flake8", None, "7"),
+            True,
+        ),
+        (
+            "Update dependency tomli to v2.0.2 - autoclosed - autoclosed",
+            ("tomli", None, "2.0.2"),
+            True,
+        ),
+        ("Configure Renovate", None, False),
+        (
+            "fix(deps): replace dependency babel-eslint with @babel/eslint-parser ^7.11.0",
+            None,
+            False,
+        ),
+    ],
+)
+def test_parse_renovate_title_with_decorations(
+    title: str, expected: tuple | None, autoclosed: bool
+) -> None:
+    parsed = parse_renovate_title(title)
+    if expected is None:
+        assert parsed is None
+        return
+    assert parsed is not None
+    assert (parsed.name, parsed.old_version, parsed.new_version) == expected
+    assert parsed.autoclosed is autoclosed
+
+
+def test_renovate_strips_parenthesized_suffix_after_version() -> None:
+    parsed = parse_renovate_title("Update dependency foo to v1 (main)")
+    assert parsed is not None
+    assert (parsed.name, parsed.new_version) == ("foo", "1")
+
+
+def test_renovate_keeps_parenthesized_part_inside_the_title() -> None:
+    assert parse_renovate_title("Update dependency foo (fork) to v1") is None
+
+
+def test_renovate_never_strips_the_title_to_nothing() -> None:
+    assert parse_renovate_title("(major)") is None
+    assert parse_renovate_title(" - autoclosed") is None
+
+
+@pytest.mark.parametrize(
     "title",
     [
         "Update all non-major dependencies",
@@ -109,6 +178,17 @@ def test_classify_title_reasons() -> None:
     assert classify_title("Bump the pip group", "dependabot").reason == "group_bump"
     assert classify_title("Update all minor dependencies", "renovate").reason == "group_bump"
     assert classify_title("Update requests", "renovate").reason == "not_single_package"
+
+
+def test_dependabot_group_across_is_single_package() -> None:
+    result = classify_title(
+        "Bump requests from 2.31.0 to 2.32.0 in the pip group across 1 directory",
+        "dependabot",
+    )
+    assert result.parsed is not None
+    assert result.parsed.name == "requests"
+    assert result.parsed.path is None
+    assert result.reason is None
 
 
 @pytest.mark.parametrize(

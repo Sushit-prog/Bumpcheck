@@ -98,6 +98,7 @@ class Candidate(BaseModel):
     rerun_flaky: bool = False
     sampled_by: CIStatus = "any"
     label: str | None = None
+    autoclosed: bool = False
 
 
 class Excluded(BaseModel):
@@ -110,6 +111,7 @@ class Excluded(BaseModel):
     pr_number: int
     title: str = ""
     reason: ExcludedReason
+    detail: str = Field(default="", max_length=200)
 
 
 class Summary(BaseModel):
@@ -127,3 +129,5 @@ class Summary(BaseModel):
     api_calls: int
     cache_hits: int
     search_calls: int = 0
+    retried: int = 0
+    recovered: int = 0

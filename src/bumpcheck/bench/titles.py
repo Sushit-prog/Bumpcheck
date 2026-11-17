@@ -25,6 +25,8 @@ _RENOVATE_RE = re.compile(
     r"\s+(?:from\s+(?P<old>[\w.+-]+)\s+)?to\s+v?(?P<new>[\w.+-]+)\s*$"
 )
 
+_DECORATION_RE = re.compile(r"(?:\s*-\s*autoclosed|\s*\[[^\]]*\]|\s*\([^)]*\))\s*$")
+
 _GROUP_MARKERS = (
     re.compile(r"\bbump\s+the\s+.+\s+group\b", re.IGNORECASE),
     re.compile(r"\bwith\s+\d+\s+updates?\b", re.IGNORECASE),
@@ -45,6 +47,7 @@ class ParsedTitle:
     new_version: str
     path: str | None = None
     bot: Bot = "dependabot"
+    autoclosed: bool = False
 
 
 DependabotTitle = ParsedTitle
@@ -72,12 +75,32 @@ def parse_dependabot_title(title: str) -> ParsedTitle | None:
     )
 
 
+def _strip_decorations(title: str) -> tuple[str, bool]:
+    """Drop trailing Renovate decorations, never stripping the title to nothing."""
+    cleaned = title.strip()
+    autoclosed = False
+    while True:
+        match = _DECORATION_RE.search(cleaned)
+        if match is None:
+            break
+        stripped = cleaned[: match.start()].rstrip()
+        if not stripped:
+            break
+        if "autoclosed" in match.group(0).lower():
+            autoclosed = True
+        cleaned = stripped
+    return cleaned, autoclosed
+
+
 def parse_renovate_title(title: str) -> ParsedTitle | None:
     """Parse a Renovate bump title, or return None for other titles.
 
     Renovate usually omits the old version, so ``old_version`` is often None.
+    Trailing decorations such as ``- autoclosed``, ``[SECURITY]`` and
+    ``(major)`` are stripped before parsing.
     """
-    match = _RENOVATE_RE.match(title.strip())
+    cleaned, autoclosed = _strip_decorations(title)
+    match = _RENOVATE_RE.match(cleaned)
     if match is None:
         return None
     return ParsedTitle(
@@ -85,6 +108,7 @@ def parse_renovate_title(title: str) -> ParsedTitle | None:
         old_version=match.group("old"),
         new_version=match.group("new"),
         bot="renovate",
+        autoclosed=autoclosed,
     )
 
 

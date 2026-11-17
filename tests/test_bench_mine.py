@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import urllib.error
 import urllib.parse
 from datetime import date
 from pathlib import Path
@@ -25,6 +26,8 @@ PR_NUMBER = 1
 OLD_UV = 'version = 1\n\n[[package]]\nname = "requests"\nversion = "2.31.0"\n'
 NEW_UV = 'version = 1\n\n[[package]]\nname = "requests"\nversion = "2.32.0"\n'
 FLASK_UV = 'version = 1\n\n[[package]]\nname = "flask"\nversion = "3.0.0"\n'
+BLACK_OLD_UV = 'version = 1\n\n[[package]]\nname = "black"\nversion = "25.1.0"\n'
+BLACK_NEW_UV = 'version = 1\n\n[[package]]\nname = "black"\nversion = "26.1.0"\n'
 
 LOG_TEXT = (
     "2026-01-02T00:00:00Z ImportError: cannot import name 'legacy' from 'requests'\n"
@@ -127,6 +130,7 @@ class FakeGitHub:
     def pr_payload(self) -> dict:
         return {
             "title": self.title,
+            "user": {"login": self.login},
             "merged": self.merged,
             "merged_at": self.merged_at if self.merged else None,
             "closed_at": self.closed_at,
@@ -321,6 +325,7 @@ def _mine_into(
     pages_per_window: int = 1,
     dependabot_label: str = "python",
     offline: bool = False,
+    retry_excluded: list[str] | None = None,
 ) -> tuple[Path, int]:
     client = GitHubClient(
         token="test-token",
@@ -346,6 +351,7 @@ def _mine_into(
         window_days=window_days,
         pages_per_window=pages_per_window,
         dependabot_label=dependabot_label,
+        retry_excluded=retry_excluded,
     )
     return out, code
 
@@ -368,6 +374,7 @@ def _run(
     pages_per_window: int = 1,
     dependabot_label: str = "python",
     offline: bool = False,
+    retry_excluded: list[str] | None = None,
 ) -> Path:
     out, _ = _mine_into(
         tmp_path,
@@ -386,6 +393,7 @@ def _run(
         pages_per_window=pages_per_window,
         dependabot_label=dependabot_label,
         offline=offline,
+        retry_excluded=retry_excluded,
     )
     return out
 
@@ -599,6 +607,7 @@ def test_lint_only_failure_is_not_attributable(tmp_path: Path) -> None:
     lint_check = dict(FAILURE_CHECK, name="ruff (/ lint)")
     excluded = _excluded(tmp_path, FakeGitHub(check_runs=[lint_check]))
     assert excluded["reason"] == "ci_not_attributable"
+    assert excluded["detail"] == "failing checks: ruff (/ lint)"
 
 
 def test_no_ci_reasons(tmp_path: Path) -> None:
@@ -623,6 +632,7 @@ def test_pending_check_is_other(tmp_path: Path) -> None:
     }
     excluded = _excluded(tmp_path, FakeGitHub(check_runs=[pending]))
     assert excluded["reason"] == "other"
+    assert excluded["detail"] == "pending checks: tests"
 
 
 def test_non_signal_conclusions_are_ignored(tmp_path: Path) -> None:
@@ -705,6 +715,10 @@ def test_group_title_is_excluded_before_fetching_the_pr(tmp_path: Path) -> None:
 def test_parse_mismatch_when_title_disagrees_with_lockfile(tmp_path: Path) -> None:
     excluded = _excluded(tmp_path, FakeGitHub(new_text=FLASK_UV))
     assert excluded["reason"] == "parse_mismatch"
+    detail = excluded["detail"]
+    assert detail.startswith("title: requests 2.31.0->2.32.0; lockfile bumps:")
+    assert "flask" in detail
+    assert len(detail) <= 200
 
 
 def test_no_supported_lockfile(tmp_path: Path) -> None:
@@ -726,6 +740,7 @@ def test_renovate_loose_version_match(tmp_path: Path) -> None:
 def test_dependabot_version_match_is_exact(tmp_path: Path) -> None:
     excluded = _excluded(tmp_path, FakeGitHub(title="Bump requests from 2.31.0 to 2"))
     assert excluded["reason"] == "parse_mismatch"
+    assert "requests 2.31.0->2.32.0" in excluded["detail"]
 
 
 def test_identical_reruns_produce_identical_files(tmp_path: Path) -> None:
@@ -1257,3 +1272,225 @@ def test_legacy_excluded_without_title_loads() -> None:
         {"case_id": "a/b#1", "repo": "a/b", "pr_number": 1, "reason": "other"}
     )
     assert excluded.title == ""
+    assert excluded.detail == ""
+
+
+class FakeNotFoundOnFiles(FakeGitHub):
+    """Returns 404 for the files endpoint so exception details are observable."""
+
+    def __call__(self, method: str, url: str, headers: dict) -> tuple:
+        if urllib.parse.urlparse(url).path.endswith("/files"):
+            self.calls.append({"url": url, "headers": dict(headers)})
+            return 404, {}, b'{"message": "Not Found"}'
+        return super().__call__(method, url, headers)
+
+
+def test_http_error_detail_is_captured_without_query_strings(tmp_path: Path) -> None:
+    excluded = _excluded(tmp_path, FakeNotFoundOnFiles())
+    assert excluded["reason"] == "other"
+    detail = excluded["detail"]
+    assert detail.startswith("HttpStatusError:")
+    assert "404" in detail
+    assert "?" not in detail
+    assert "per_page" not in detail
+
+
+def test_network_error_detail_is_captured(tmp_path: Path) -> None:
+    class FakeNetworkError(FakeGitHub):
+        def __call__(self, method: str, url: str, headers: dict) -> tuple:
+            if urllib.parse.urlparse(url).path.endswith("/files"):
+                raise urllib.error.URLError("network down")
+            return super().__call__(method, url, headers)
+
+    excluded = _excluded(tmp_path, FakeNetworkError())
+    assert excluded["reason"] == "other"
+    assert excluded["detail"].startswith("GitHubError: Network error")
+
+
+def _write_records(out: Path, name: str, *records: dict) -> None:
+    out.mkdir(parents=True, exist_ok=True)
+    (out / name).write_text(
+        "".join(json.dumps(record, ensure_ascii=False) + "\n" for record in records),
+        encoding="utf-8",
+    )
+
+
+def _legacy_excluded(
+    reason: str,
+    *,
+    title: str | None = None,
+    repo: str = REPO_FULL,
+    number: int = PR_NUMBER,
+) -> dict:
+    record: dict = {
+        "case_id": f"{repo}#{number}",
+        "repo": repo,
+        "pr_number": number,
+        "reason": reason,
+    }
+    if title is not None:
+        record["title"] = title
+    return record
+
+
+def _summary(out: Path) -> dict:
+    return json.loads((out / "summary.json").read_text(encoding="utf-8"))
+
+
+def test_retry_fetches_missing_title_and_recovers(tmp_path: Path) -> None:
+    out = tmp_path / "out"
+    _write_records(out, "excluded.jsonl", _legacy_excluded("not_single_package"))
+    title = "Update dependency black to v26 [SECURITY] - autoclosed"
+    fake = FakeGitHub(
+        title=title,
+        login="renovate[bot]",
+        old_text=BLACK_OLD_UV,
+        new_text=BLACK_NEW_UV,
+    )
+
+    _run(tmp_path, fake, retry_excluded=["not_single_package"], limit=0)
+
+    candidates = _read_jsonl(out / "candidates.jsonl")
+    assert [record["case_id"] for record in candidates] == [f"{REPO_FULL}#{PR_NUMBER}"]
+    assert candidates[0]["title"] == title
+    assert candidates[0]["autoclosed"] is True
+    assert candidates[0]["bot"] == "renovate"
+    assert _read_jsonl(out / "excluded.jsonl") == []
+    assert len([call for call in fake.calls if call["url"].endswith("/pulls/1")]) == 1
+
+
+def test_retry_stores_fetched_title_when_still_not_a_bump(tmp_path: Path) -> None:
+    out = tmp_path / "out"
+    _write_records(out, "excluded.jsonl", _legacy_excluded("not_single_package"))
+    fake = FakeGitHub(title="Configure Renovate", login="renovate[bot]")
+
+    _run(tmp_path, fake, retry_excluded=["not_single_package"], limit=0)
+
+    excluded = _read_jsonl(out / "excluded.jsonl")
+    assert len(excluded) == 1
+    assert excluded[0]["title"] == "Configure Renovate"
+    assert excluded[0]["reason"] == "not_single_package"
+    assert [call["url"] for call in fake.calls] == [f"{API}/repos/{REPO_FULL}/pulls/1"]
+
+
+def test_retry_runs_when_limit_is_already_met(tmp_path: Path) -> None:
+    out = tmp_path / "out"
+    _write_records(out, "candidates.jsonl", {"case_id": f"{REPO_FULL}#9", "repo": REPO_FULL})
+    _write_records(
+        out,
+        "excluded.jsonl",
+        _legacy_excluded("not_single_package", title="Update dependency black to v26 - autoclosed"),
+    )
+    fake = FakeGitHub(
+        title="Update dependency black to v26 - autoclosed",
+        login="renovate[bot]",
+        old_text=BLACK_OLD_UV,
+        new_text=BLACK_NEW_UV,
+    )
+
+    _run(tmp_path, fake, retry_excluded=["not_single_package"], limit=1)
+
+    kept = {record["case_id"] for record in _read_jsonl(out / "candidates.jsonl")}
+    assert kept == {f"{REPO_FULL}#1", f"{REPO_FULL}#9"}
+    summary = _summary(out)
+    assert summary["kept"] == 2
+    assert summary["retried"] == 1
+    assert summary["recovered"] == 1
+    assert summary["search_calls"] == 0
+    assert not any("/search/" in call["url"] for call in fake.calls)
+
+
+def test_retry_processes_prs_discovery_never_finds(tmp_path: Path) -> None:
+    out = tmp_path / "out"
+    _write_records(out, "excluded.jsonl", _legacy_excluded("no_supported_lockfile"))
+    fake = FakeSpread({})
+
+    _run(tmp_path, fake, retry_excluded=["no_supported_lockfile"])
+
+    candidates = _read_jsonl(out / "candidates.jsonl")
+    assert [record["case_id"] for record in candidates] == [f"{REPO_FULL}#{PR_NUMBER}"]
+    assert _summary(out)["recovered"] == 1
+
+
+def test_retry_respects_max_per_repo(tmp_path: Path) -> None:
+    out = tmp_path / "out"
+    _write_records(out, "candidates.jsonl", {"case_id": f"{REPO_FULL}#9", "repo": REPO_FULL})
+    _write_records(out, "excluded.jsonl", _legacy_excluded("no_supported_lockfile"))
+    fake = FakeGitHub()
+
+    _run(
+        tmp_path,
+        fake,
+        retry_excluded=["no_supported_lockfile"],
+        max_per_repo=1,
+        limit=0,
+    )
+
+    excluded = _read_jsonl(out / "excluded.jsonl")
+    assert excluded[0]["reason"] == "repo_cap"
+    assert not any("/pulls/" in call["url"] for call in fake.calls)
+
+
+def test_retry_respects_noise_patterns(tmp_path: Path) -> None:
+    out = tmp_path / "out"
+    _write_records(
+        out,
+        "excluded.jsonl",
+        _legacy_excluded(
+            "not_single_package",
+            title="Update dependency black to v26",
+            repo="acme/skills-tool",
+        ),
+    )
+    fake = FakeGitHub(title="Update dependency black to v26", login="renovate[bot]")
+
+    _run(tmp_path, fake, retry_excluded=["not_single_package"], limit=0)
+
+    excluded = _read_jsonl(out / "excluded.jsonl")
+    assert excluded[0]["reason"] == "noise_repo"
+    assert fake.calls == []
+
+
+def test_retry_never_reprocesses_candidates(tmp_path: Path) -> None:
+    out = tmp_path / "out"
+    _write_records(
+        out,
+        "candidates.jsonl",
+        {"case_id": f"{REPO_FULL}#{PR_NUMBER}", "repo": REPO_FULL},
+    )
+    fake = FakeGitHub(title="Bump the pip group across 1 directory with 3 updates")
+
+    _run(tmp_path, fake, retry_excluded=["group_bump"])
+
+    assert not any("/pulls/" in call["url"] for call in fake.calls)
+    assert len(_read_jsonl(out / "candidates.jsonl")) == 1
+
+
+def test_retry_excluded_reason_must_be_known(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="Unknown --retry-excluded reason"):
+        mine(
+            out=tmp_path / "out",
+            since=date(2026, 1, 1),
+            until=date(2026, 2, 1),
+            retry_excluded=["made_up"],
+        )
+
+
+def test_renovate_autoclosed_candidate_is_flagged(tmp_path: Path) -> None:
+    candidate, _ = _candidate(
+        tmp_path,
+        FakeGitHub(
+            title="Update dependency requests to v2.32.0 - autoclosed",
+            login="renovate[bot]",
+        ),
+        out_name="out1",
+    )
+    assert candidate["autoclosed"] is True
+
+    plain, _ = _candidate(
+        tmp_path,
+        FakeGitHub(title="Update dependency requests to v2.32.0", login="renovate[bot]"),
+        out_name="out2",
+        cache_name="cache2",
+    )
+    assert plain["autoclosed"] is False
