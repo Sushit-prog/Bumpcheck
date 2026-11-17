@@ -9,7 +9,10 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
+import os
 import re
+import sys
+import time
 import urllib.parse
 from collections import Counter
 from collections.abc import Iterator
@@ -43,6 +46,8 @@ MAX_LOG_LINES_PER_CHECK = 4
 MAX_LOG_LINES_PER_CASE = 40
 MAX_LOG_BYTES_PER_CASE = 16 * 1024
 MAX_LOG_LINE_LENGTH = 500
+REPLACE_RETRIES = 3
+REPLACE_RETRY_SLEEP = 0.2
 MAX_LATER_FIXES = 5
 LATER_FIX_CALL_BUDGET = 2
 TEST_SPLIT_THRESHOLD = 77
@@ -636,10 +641,36 @@ def _load_records(path: Path) -> dict[str, dict]:
     return records
 
 
+_replace = os.replace
+_replace_sleep = time.sleep
+
+
+def _replace_with_retry(tmp: Path, path: Path) -> None:
+    for attempt in range(REPLACE_RETRIES + 1):
+        try:
+            _replace(tmp, path)
+            return
+        except PermissionError:
+            if attempt >= REPLACE_RETRIES:
+                raise
+            _replace_sleep(REPLACE_RETRY_SLEEP)
+
+
 def _write_jsonl(path: Path, records: dict[str, dict]) -> None:
-    with path.open("w", encoding="utf-8", newline="\n") as handle:
-        for case_id in sorted(records):
-            handle.write(json.dumps(records[case_id], ensure_ascii=False) + "\n")
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        with tmp.open("w", encoding="utf-8", newline="\n") as handle:
+            for case_id in sorted(records):
+                handle.write(json.dumps(records[case_id], ensure_ascii=False) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        _replace_with_retry(tmp, path)
+    except BaseException:
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
+        raise
 
 
 def _build_summary(
@@ -661,6 +692,16 @@ def _build_summary(
         api_calls=client.api_calls,
         cache_hits=client.cache_hits,
     )
+
+
+def _write_summary(
+    out: Path, candidates: dict[str, dict], excluded: dict[str, dict], client: GitHubClient
+) -> Summary:
+    summary = _build_summary(candidates, excluded, client)
+    (out / "summary.json").write_text(
+        json.dumps(summary.model_dump(), indent=2) + "\n", encoding="utf-8"
+    )
+    return summary
 
 
 def mine(
@@ -697,27 +738,43 @@ def mine(
     excluded = _load_records(excluded_path)
     seen = set(candidates) | set(excluded)
 
-    if len(candidates) < limit:
-        bots = ["dependabot", "renovate"] if bot == "both" else [bot]
-        for item in _iter_discoveries(active_client, bots, since_date, until_date):
-            case_id = f"{item.repo}#{item.number}"
-            if case_id in seen:
-                continue
-            result = _mine_safely(active_client, item, logs=logs)
-            if isinstance(result, Candidate):
-                candidates[case_id] = result.model_dump()
-            else:
-                excluded[case_id] = result.model_dump()
-            seen.add(case_id)
-            if len(candidates) >= limit:
-                break
+    try:
+        if len(candidates) < limit:
+            bots = ["dependabot", "renovate"] if bot == "both" else [bot]
+            for item in _iter_discoveries(active_client, bots, since_date, until_date):
+                case_id = f"{item.repo}#{item.number}"
+                if case_id in seen:
+                    continue
+                result = _mine_safely(active_client, item, logs=logs)
+                if isinstance(result, Candidate):
+                    candidates[case_id] = result.model_dump()
+                    outcome = f"kept ({result.label_suggestion})"
+                else:
+                    excluded[case_id] = result.model_dump()
+                    outcome = f"excluded ({result.reason})"
+                seen.add(case_id)
+                _write_jsonl(candidates_path, candidates)
+                _write_jsonl(excluded_path, excluded)
+                print(
+                    f"[{len(candidates)}/{limit}] {case_id} -> {outcome}",
+                    file=sys.stderr,
+                )
+                if len(candidates) >= limit:
+                    break
+    except KeyboardInterrupt:
+        _write_jsonl(candidates_path, candidates)
+        _write_jsonl(excluded_path, excluded)
+        _write_summary(out, candidates, excluded, active_client)
+        print(
+            f"interrupted; saved {len(candidates)} candidate(s) and "
+            f"{len(excluded)} exclusion(s) to {out}",
+            file=sys.stderr,
+        )
+        return 130
 
     _write_jsonl(candidates_path, candidates)
     _write_jsonl(excluded_path, excluded)
-    summary = _build_summary(candidates, excluded, active_client)
-    (out / "summary.json").write_text(
-        json.dumps(summary.model_dump(), indent=2) + "\n", encoding="utf-8"
-    )
+    summary = _write_summary(out, candidates, excluded, active_client)
 
     print(
         f"Mined {summary.kept} candidate(s) and {summary.excluded} exclusion(s) "

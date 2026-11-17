@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import urllib.parse
 from datetime import date
 from pathlib import Path
 
 import pytest
 
+import bumpcheck.bench.mine as bench_mine
 from bumpcheck.bench.github import GitHubClient, GitHubError
 from bumpcheck.bench.mine import _iter_window, mine, search_url
 
@@ -162,7 +164,43 @@ class FakeFullPage(FakeGitHub):
         return super().__call__(method, url, headers)
 
 
-def _run(
+class FakeMulti(FakeGitHub):
+    """Serves several distinct PRs from one search page, optionally interrupting."""
+
+    def __init__(self, titles: list[str], *, interrupt_at: int | None = None) -> None:
+        super().__init__(title=titles[0])
+        self.titles = titles
+        self.interrupt_at = interrupt_at
+
+    def __call__(self, method: str, url: str, headers: dict) -> tuple:
+        path = urllib.parse.urlparse(url).path
+        if path == "/search/issues":
+            self.calls.append({"url": url, "headers": dict(headers)})
+            items = []
+            for number, title in enumerate(self.titles, start=1):
+                item = dict(self.search_item)
+                item["number"] = number
+                item["title"] = title
+                item["html_url"] = f"https://github.com/{REPO_FULL}/pull/{number}"
+                items.append(item)
+            return _json({"total_count": len(items), "items": items})
+        prefix = f"/repos/{REPO_FULL}/pulls/"
+        if path.startswith(prefix):
+            number_text, _, suffix = path[len(prefix) :].partition("/")
+            if number_text.isdigit():
+                number = int(number_text)
+                if not suffix:
+                    if self.interrupt_at is not None and number >= self.interrupt_at:
+                        raise KeyboardInterrupt
+                    self.calls.append({"url": url, "headers": dict(headers)})
+                    payload = dict(self.pr_payload)
+                    payload["title"] = self.titles[number - 1]
+                    return _json(payload)
+                return super().__call__(method, f"{API}{prefix}{PR_NUMBER}/{suffix}", headers)
+        return super().__call__(method, url, headers)
+
+
+def _mine_into(
     tmp_path: Path,
     fake: FakeGitHub,
     *,
@@ -170,7 +208,7 @@ def _run(
     cache_name: str = "cache",
     logs: bool = False,
     limit: int = 10,
-) -> Path:
+) -> tuple[Path, int]:
     client = GitHubClient(
         token="test-token",
         transport=fake,
@@ -180,13 +218,28 @@ def _run(
         cache_dir=tmp_path / cache_name,
     )
     out = tmp_path / out_name
-    mine(
+    code = mine(
         out=out,
         since=date(2026, 1, 1),
         until=date(2026, 2, 1),
         limit=limit,
         logs=logs,
         client=client,
+    )
+    return out, code
+
+
+def _run(
+    tmp_path: Path,
+    fake: FakeGitHub,
+    *,
+    out_name: str = "out",
+    cache_name: str = "cache",
+    logs: bool = False,
+    limit: int = 10,
+) -> Path:
+    out, _ = _mine_into(
+        tmp_path, fake, out_name=out_name, cache_name=cache_name, logs=logs, limit=limit
     )
     return out
 
@@ -492,3 +545,126 @@ def test_windows_split_when_search_is_capped() -> None:
         start_text, end_text = window.split("..")
         assert date.fromisoformat(start_text) >= date(2026, 1, 1)
         assert date.fromisoformat(end_text) <= date(2026, 1, 14)
+
+
+def test_progress_lines_report_kept_and_excluded_without_token(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    titles = [
+        "Bump the pip group across 1 directory with 3 updates",
+        "Bump requests from 2.31.0 to 2.32.0",
+    ]
+    fake = FakeMulti(titles)
+    out, code = _mine_into(tmp_path, fake, limit=10)
+    err = capsys.readouterr().err
+
+    assert code == 0
+    assert f"[0/10] {REPO_FULL}#1 -> excluded (group_bump)" in err
+    assert f"[1/10] {REPO_FULL}#2 -> kept (OK_SUSPECT)" in err
+    progress = [line for line in err.splitlines() if " -> " in line]
+    assert len(progress) == 2
+    for line in progress:
+        assert "http" not in line
+        assert "?" not in line
+    assert "test-token" not in err
+    assert {path.name for path in out.iterdir()} == {
+        "candidates.jsonl",
+        "excluded.jsonl",
+        "summary.json",
+    }
+
+
+def _sorted_case_ids(path: Path) -> list[str]:
+    records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+    case_ids = [record["case_id"] for record in records]
+    assert case_ids == sorted(case_ids)
+    return case_ids
+
+
+def test_interrupt_saves_sorted_files_and_resume_matches_full_run(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    titles = ["Bump requests from 2.31.0 to 2.32.0"] * 3
+
+    full_out, full_code = _mine_into(
+        tmp_path, FakeMulti(titles), out_name="full", cache_name="cache_full"
+    )
+    candidates_bytes = (full_out / "candidates.jsonl").read_bytes()
+    excluded_bytes = (full_out / "excluded.jsonl").read_bytes()
+    full_summary = json.loads((full_out / "summary.json").read_text(encoding="utf-8"))
+    assert full_code == 0
+
+    part_out, part_code = _mine_into(
+        tmp_path,
+        FakeMulti(titles, interrupt_at=2),
+        out_name="part",
+        cache_name="cache_part",
+    )
+    assert part_code == 130
+    err = capsys.readouterr().err
+    assert "interrupted; saved 1 candidate(s) and 0 exclusion(s)" in err
+    assert str(part_out) in err
+    assert _sorted_case_ids(part_out / "candidates.jsonl") == [f"{REPO_FULL}#1"]
+    assert _sorted_case_ids(part_out / "excluded.jsonl") == []
+    assert (part_out / "summary.json").exists()
+    assert {path.name for path in part_out.iterdir()} == {
+        "candidates.jsonl",
+        "excluded.jsonl",
+        "summary.json",
+    }
+
+    _, resumed = _mine_into(tmp_path, FakeMulti(titles), out_name="part", cache_name="cache_part")
+    assert resumed == 0
+    assert (part_out / "candidates.jsonl").read_bytes() == candidates_bytes
+    assert (part_out / "excluded.jsonl").read_bytes() == excluded_bytes
+    resumed_ids = _sorted_case_ids(part_out / "candidates.jsonl")
+    assert len(resumed_ids) == len(set(resumed_ids)) == 3
+
+    part_summary = json.loads((part_out / "summary.json").read_text(encoding="utf-8"))
+    for key in ("kept", "excluded", "distinct_repos", "labels", "reasons", "bots", "splits"):
+        assert part_summary[key] == full_summary[key]
+
+
+def test_write_jsonl_retries_replace_on_permission_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "candidates.jsonl"
+    attempts: list[int] = []
+    sleeps: list[float] = []
+    real_replace = os.replace
+
+    def flaky_replace(src: Path, dst: Path) -> None:
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise PermissionError("locked")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(bench_mine, "_replace", flaky_replace)
+    monkeypatch.setattr(bench_mine, "_replace_sleep", sleeps.append)
+
+    bench_mine._write_jsonl(path, {"acme/widgets#1": {"case_id": "acme/widgets#1"}})
+
+    assert len(attempts) == 2
+    assert sleeps == [0.2]
+    assert json.loads(path.read_text(encoding="utf-8"))["case_id"] == "acme/widgets#1"
+    assert list(tmp_path.glob("*.tmp")) == []
+
+
+def test_write_jsonl_keyboard_interrupt_keeps_previous_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "candidates.jsonl"
+    previous = '{"case_id": "old"}\n'
+    path.write_text(previous, encoding="utf-8")
+
+    def interrupted_replace(src: Path, dst: Path) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(bench_mine, "_replace", interrupted_replace)
+    monkeypatch.setattr(bench_mine, "_replace_sleep", lambda seconds: None)
+
+    with pytest.raises(KeyboardInterrupt):
+        bench_mine._write_jsonl(path, {"acme/widgets#2": {"case_id": "acme/widgets#2"}})
+
+    assert path.read_text(encoding="utf-8") == previous
+    assert list(tmp_path.glob("*.tmp")) == []

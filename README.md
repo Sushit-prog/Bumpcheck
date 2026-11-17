@@ -164,7 +164,10 @@ spaced at least 1 second apart (search at least 2), and rate-limit 403/429
 responses are retried with the API's own retry hint (or a doubling backoff, up
 to four retries) before failing with the API's message. Rerunning
 into the same `--out` skips cases that are already recorded; `--limit` counts
-those earlier candidates too.
+those earlier candidates too. Each processed PR prints one progress line to
+stderr, and both JSONL files are rewritten atomically (temp file + replace)
+after every case, so pressing Ctrl-C saves what has been mined, writes
+`summary.json`, and exits with code 130; a rerun resumes from that state.
 
 The `dev`/`test` split is assigned deterministically per repository
 (`sha256(repo)` first byte below 77 means `test`, about 30%), so reruns and

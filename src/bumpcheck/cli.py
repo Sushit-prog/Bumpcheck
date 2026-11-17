@@ -312,7 +312,7 @@ def bench_mine(
         raise typer.Exit(code=2) from exc
 
     try:
-        run_mine(
+        code = run_mine(
             out=out,
             bot=bot.value,
             since=since_date,
@@ -325,3 +325,5 @@ def bench_mine(
     except (GitHubError, ValueError) as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=2) from exc
+    if code:
+        raise typer.Exit(code=code)
