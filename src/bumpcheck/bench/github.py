@@ -209,6 +209,38 @@ class GitHubClient:
         self._pause_if_exhausted(response_headers)
         return body
 
+    def get_external_bytes(self, url: str, *, timeout: float = 10) -> bytes:
+        """Fetch a non-GitHub URL through the same cache, without credentials."""
+        entry = self._load_cache(url)
+        if entry is not None:
+            self.cache_hits += 1
+            return entry["body"]
+        if self.offline:
+            raise OfflineCacheMiss(
+                f"--offline was given but nothing for {url} is cached in {self.cache_dir}"
+            )
+        request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT}, method="GET")
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                body = response.read()
+        except urllib.error.HTTPError as exc:
+            body = exc.read() if exc.fp is not None else b""
+            headers = dict(exc.headers.items()) if exc.headers else {}
+            raise HttpStatusError(exc.code, url, body, headers) from exc
+        except RETRYABLE_NETWORK_ERRORS as exc:
+            path = urllib.parse.urlsplit(url).path
+            raise GitHubError(f"Network error for {path}: {type(exc).__name__}: {exc}") from exc
+        self._store_cache(url, None, body)
+        return body
+
+    def get_external_json(self, url: str, *, timeout: float = 10) -> Any:
+        body = self.get_external_bytes(url, timeout=timeout)
+        try:
+            return json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError) as exc:
+            path = urllib.parse.urlsplit(url).path
+            raise GitHubError(f"Invalid JSON response for {path}") from exc
+
     def get_log(self, url: str) -> str:
         """Fetch a job log, following its redirect without the token.
 

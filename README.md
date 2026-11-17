@@ -290,6 +290,24 @@ suggestion, and repeatable `--also-dir DIR` skips case_ids already labeled for
 that round in another store. Labels are never saved for a case already labeled
 in the selected round; re-labeling the same `(case_id, round)` replaces it.
 
+### Inspecting candidates
+
+Print a read-only report for one mined case. No candidate or label files are
+written; only the response cache may be updated:
+
+```
+uv run bumpcheck bench inspect acme/widgets#123 --dir bench/v0-candidates
+```
+
+The report includes the PR header, PyPI `requires_python` and dependency changes
+for both versions, workflow triggers/jobs/python-version matrices and relevant
+`run:` lines, a package-filtered lockfile diff, Python-version verdict hints
+against the new release's `requires_python`, and inferred workflow/job locations
+for failing checks. `--also-dir DIR` (repeatable) falls back to other candidate
+stores when the case is missing from `--dir`. `--offline` replays the response
+cache only; `--cache-dir` selects the cache directory (default
+`.bumpcheck-cache/github`).
+
 ## Acceptance run
 
 Check the API diff against known breaking releases listed in

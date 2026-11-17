@@ -12,6 +12,8 @@ from packaging.version import InvalidVersion, Version
 from bumpcheck import __version__
 from bumpcheck.apidiff import ApiDiffResult, diff_versions
 from bumpcheck.bench.github import GitHubError
+from bumpcheck.bench.inspect_case import inspect_case as run_inspect
+from bumpcheck.bench.inspect_case import redact
 from bumpcheck.bench.labels import (
     compute_agreement,
     compute_stats,
@@ -513,3 +515,45 @@ def bench_agreement(
     typer.echo(f"cohen's kappa: {kappa_text}")
     typer.echo("disagreeing: " + (", ".join(result["disagreeing_case_ids"]) or "none"))
     typer.echo("EXCLUDE disagreements: " + (", ".join(result["exclude_disagreements"]) or "none"))
+
+
+@bench_app.command("inspect")
+def bench_inspect(
+    case_id: str = typer.Argument(
+        ...,
+        help="Candidate case id, e.g. owner/repo#123.",
+    ),
+    dir: Path = typer.Option(
+        ...,
+        "--dir",
+        help="Directory containing candidates.jsonl.",
+    ),
+    also_dir: list[Path] | None = typer.Option(
+        None,
+        "--also-dir",
+        help="Fallback directories to search for the case; repeatable.",
+    ),
+    offline: bool = typer.Option(
+        False,
+        "--offline",
+        help="Read the response cache only; never touch the network.",
+    ),
+    cache_dir: Path | None = typer.Option(
+        None,
+        "--cache-dir",
+        help="Response cache directory (default .bumpcheck-cache/github).",
+    ),
+) -> None:
+    """Print a read-only inspection report for one candidate."""
+    try:
+        report = run_inspect(
+            case_id,
+            dir=dir,
+            also_dirs=also_dir,
+            offline=offline,
+            cache_dir=cache_dir,
+        )
+    except (GitHubError, ValueError, OSError) as exc:
+        typer.echo(redact(str(exc)), err=True)
+        raise typer.Exit(code=2) from exc
+    typer.echo(report, nl=False)
