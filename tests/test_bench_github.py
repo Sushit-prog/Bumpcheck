@@ -3,11 +3,13 @@ from __future__ import annotations
 import http.client
 import json
 import urllib.error
+import urllib.request
 from pathlib import Path
 
 import pytest
 
 from bumpcheck.bench.github import (
+    USER_AGENT,
     GitHubClient,
     GitHubError,
     HttpStatusError,
@@ -400,3 +402,53 @@ def test_minimum_request_gap_applies_to_all_requests(tmp_path: Path) -> None:
     client.get_json(second)
 
     assert sleeps == [1.0]
+
+
+def test_external_requests_carry_no_authorization_including_redirect(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: list[tuple[str, dict[str, str]]] = []
+    redirector = urllib.request.HTTPRedirectHandler()
+
+    class _Response:
+        def __init__(self, body: bytes) -> None:
+            self._body = body
+
+        def read(self) -> bytes:
+            return self._body
+
+        def __enter__(self) -> _Response:
+            return self
+
+        def __exit__(self, *exc: object) -> bool:
+            return False
+
+    def fake_urlopen(
+        request: urllib.request.Request, timeout: float | None = None, **kwargs: object
+    ) -> _Response:
+        captured.append((request.full_url, dict(request.header_items())))
+        if len(captured) == 1:
+            hop = redirector.redirect_request(
+                request, None, 302, "Moved", {}, "https://files.pythonhosted.org/final.whl"
+            )
+            assert hop is not None
+            return fake_urlopen(hop, timeout=timeout)
+        return _Response(b'{"info": {}}')
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    client = GitHubClient(token="super-secret-token", cache_dir=tmp_path / "cache")
+    body = client.get_external_bytes("https://pypi.org/pypi/requests/2.32.0/json")
+
+    assert body == b'{"info": {}}'
+    assert client.token == "super-secret-token"
+    assert [url for url, _ in captured] == [
+        "https://pypi.org/pypi/requests/2.32.0/json",
+        "https://files.pythonhosted.org/final.whl",
+    ]
+    for _, headers in captured:
+        assert "authorization" not in {name.lower() for name in headers}
+        assert all("super-secret-token" not in value for value in headers.values())
+    first_headers = captured[0][1]
+    user_agents = [value for name, value in first_headers.items() if name.lower() == "user-agent"]
+    assert user_agents == [USER_AGENT]

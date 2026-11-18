@@ -15,14 +15,14 @@ from typing import Any
 
 import yaml
 from packaging.requirements import InvalidRequirement, Requirement
-from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.utils import canonicalize_name
-from packaging.version import InvalidVersion, Version
+from packaging.version import Version
 
 from bumpcheck.bench import github
 from bumpcheck.bench.github import GitHubClient, GitHubError, HttpStatusError
 from bumpcheck.bench.labels import load_candidates
 from bumpcheck.bench.mine import FAILURE_CONCLUSIONS
+from bumpcheck.pycompat import allows_python, normalize_python_version, python_floor
 
 PYPI_JSON_URL = "https://pypi.org/pypi/{name}/{version}/json"
 WORKFLOW_DIR = ".github/workflows"
@@ -432,46 +432,6 @@ def _lockfile_diff(
     return _filter_diff_for_package(list(diff), package)
 
 
-def _normalize_python_version(raw: str) -> Version | None:
-    text = str(raw).strip()
-    if not text:
-        return None
-    if text.lower().endswith(".x"):
-        text = f"{text[:-2]}.0"
-    elif re.fullmatch(r"\d+", text):
-        text = f"{text}.0"
-    try:
-        return Version(text)
-    except InvalidVersion:
-        return None
-
-
-def _python_allows(specifier: str | None, version: Version) -> bool | None:
-    if not specifier:
-        return None
-    try:
-        return version in SpecifierSet(specifier)
-    except InvalidSpecifier:
-        return None
-
-
-def _specifier_floor(specifier: str) -> Version | None:
-    try:
-        spec_set = SpecifierSet(specifier)
-    except InvalidSpecifier:
-        return None
-    for major in (2, 3, 4, 5):
-        for minor in range(40):
-            for text in (f"{major}.{minor}", f"{major}.{minor}.0"):
-                try:
-                    candidate = Version(text)
-                except InvalidVersion:
-                    continue
-                if candidate in spec_set:
-                    return Version(f"{major}.{minor}")
-    return None
-
-
 def _version_in_name(version: str, check_name: str) -> bool:
     if not version:
         return False
@@ -632,11 +592,11 @@ def _verdict_lines(
     for workflow in workflows:
         for job in workflow.jobs:
             for raw in job.python_versions:
-                version = _normalize_python_version(raw)
+                version = normalize_python_version(raw)
                 if version is not None:
                     versions.setdefault(version, str(version))
     if repo_requires_python:
-        floor = _specifier_floor(repo_requires_python)
+        floor = python_floor(repo_requires_python)
         if floor is not None:
             versions.setdefault(floor, str(floor))
     if not versions:
@@ -645,7 +605,7 @@ def _verdict_lines(
     old_spec = old_info.requires_python if old_info else None
     lines = ["verdict hints:"]
     for version in sorted(versions):
-        new_allowed = _python_allows(new_spec, version)
+        new_allowed = allows_python(new_spec, version)
         if new_allowed is None:
             new_state = "unknown (requires_python unavailable)"
         elif new_allowed:
@@ -655,7 +615,7 @@ def _verdict_lines(
         if not old_version_available:
             old_state = "unavailable"
         else:
-            old_allowed = _python_allows(old_spec, version)
+            old_allowed = allows_python(old_spec, version)
             if old_allowed is None:
                 old_state = "unknown (requires_python unavailable)"
             elif old_allowed:
