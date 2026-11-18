@@ -20,6 +20,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable, Mapping
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -57,6 +58,18 @@ class GitHubError(Exception):
     """A GitHub request failed and could not be recovered."""
 
 
+class GitHubFatalError(GitHubError):
+    """A GitHub error that callers must not downgrade to a soft failure."""
+
+
+class GitHubAuthError(GitHubFatalError):
+    """GitHub rejected the configured token."""
+
+
+class RateLimitWaitTooLong(GitHubFatalError):
+    """The next rate-limit wait exceeds the configured maximum."""
+
+
 class HttpStatusError(GitHubError):
     """A GitHub request returned a non-retryable error status."""
 
@@ -91,6 +104,10 @@ class OfflineCacheMiss(GitHubError):
 
 def _stderr_warning(message: str) -> None:
     print(message, file=sys.stderr)
+
+
+def _local_time(epoch: float) -> str:
+    return datetime.fromtimestamp(epoch).strftime("%Y-%m-%d %H:%M:%S") + " local"
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -150,6 +167,7 @@ class GitHubClient:
         warn: Callable[[str], None] | None = None,
         cache_dir: Path | None = None,
         offline: bool = False,
+        max_rate_limit_wait_s: float = 900.0,
     ) -> None:
         self.token = token if token is not None else os.environ.get("GITHUB_TOKEN")
         self._transport = transport or urllib_transport
@@ -159,10 +177,12 @@ class GitHubClient:
         self._warn = warn if warn is not None else _stderr_warning
         self.cache_dir = Path(cache_dir) if cache_dir is not None else DEFAULT_CACHE_DIR
         self.offline = offline
+        self.max_rate_limit_wait_s = max_rate_limit_wait_s
         self.api_calls = 0
         self.search_calls = 0
         self.cache_hits = 0
         self._last_request_at: float | None = None
+        self._pending_reset_at: float | None = None
 
     def _base_headers(self, *, authenticate: bool = True) -> dict[str, str]:
         headers = {
@@ -274,6 +294,7 @@ class GitHubClient:
         return body.decode("utf-8", "replace")
 
     def _send(self, url: str, headers: dict[str, str]) -> tuple[int, Mapping[str, str], bytes]:
+        self._wait_for_pending_reset()
         attempt = 0
         rate_limit_attempt = 0
         net_attempt = 0
@@ -303,20 +324,42 @@ class GitHubClient:
                 if rate is not None and rate_limit_attempt < MAX_RATE_LIMIT_RETRIES:
                     delay, reason = rate
                     rate_limit_attempt += 1
+                    wake = self._rate_limit_wake(response_headers, delay)
+                    if delay > self.max_rate_limit_wait_s:
+                        raise RateLimitWaitTooLong(self._wait_too_long_message(delay, wake))
                     if delay >= NOTICE_MIN_SLEEP:
                         path = urllib.parse.urlsplit(url).path
                         self._warn(
-                            f"rate limited ({reason}); sleeping {delay:g}s, "
+                            f"rate limited ({reason}); sleeping {delay:g}s until {wake}, "
                             f"retry {rate_limit_attempt}/{MAX_RATE_LIMIT_RETRIES} for {path}"
                         )
                     self._sleep(delay)
                     continue
                 return status, response_headers, body
+            if status == 401 and _header(headers, "authorization") is not None:
+                raise GitHubAuthError(
+                    "GitHub rejected the token (401): it is missing, expired or revoked"
+                )
             if 500 <= status < 600 and attempt + 1 < MAX_ATTEMPTS:
                 self._sleep((2.0**attempt) + self._rng() * 0.5)
                 attempt += 1
                 continue
             return status, response_headers, body
+
+    def _wait_too_long_message(self, delay: float, wake: str) -> str:
+        return (
+            f"rate limit wait is {delay / 60:.1f} minutes (until {wake}); "
+            "re-run after that time, or pass --max-rate-limit-wait SECONDS to wait"
+        )
+
+    def _rate_limit_wake(self, headers: Mapping[str, str], delay: float) -> str:
+        reset = _header(headers, "x-ratelimit-reset")
+        if reset is not None:
+            try:
+                return _local_time(float(reset))
+            except ValueError:
+                pass
+        return _local_time(self._now() + delay)
 
     def _rate_limit_sleep(
         self, headers: Mapping[str, str], body: bytes, attempt: int
@@ -347,19 +390,24 @@ class GitHubClient:
         return 60.0 * (2.0**attempt), reason
 
     def _pause_if_exhausted(self, headers: Mapping[str, str]) -> None:
-        if _header(headers, "x-ratelimit-remaining") == "0":
-            self._sleep_until_reset(_header(headers, "x-ratelimit-reset"))
-
-    def _sleep_until_reset(self, reset: str | None) -> None:
-        if reset is None:
-            self._sleep(60.0)
+        if _header(headers, "x-ratelimit-remaining") != "0":
             return
+        reset = _header(headers, "x-ratelimit-reset")
         try:
-            reset_at = float(reset)
+            self._pending_reset_at = float(reset) if reset is not None else self._now() + 60.0
         except ValueError:
-            self._sleep(60.0)
+            self._pending_reset_at = self._now() + 60.0
+
+    def _wait_for_pending_reset(self) -> None:
+        reset_at = self._pending_reset_at
+        if reset_at is None:
             return
-        self._sleep(max(0.0, reset_at - self._now()) + 0.5)
+        self._pending_reset_at = None
+        delay = max(0.0, reset_at - self._now()) + 0.5
+        wake = _local_time(reset_at)
+        if delay > self.max_rate_limit_wait_s:
+            raise RateLimitWaitTooLong(self._wait_too_long_message(delay, wake))
+        self._sleep(delay)
 
     def _throttle(self, url: str) -> None:
         interval = SEARCH_MIN_INTERVAL if "/search/" in url else MIN_REQUEST_INTERVAL

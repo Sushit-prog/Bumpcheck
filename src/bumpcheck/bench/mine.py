@@ -23,7 +23,12 @@ from typing import cast, get_args
 from packaging.utils import canonicalize_name
 
 from bumpcheck.bench import github
-from bumpcheck.bench.github import GitHubClient, GitHubError, HttpStatusError
+from bumpcheck.bench.github import (
+    GitHubClient,
+    GitHubError,
+    GitHubFatalError,
+    HttpStatusError,
+)
 from bumpcheck.bench.lockfiles import lockfile_kind
 from bumpcheck.bench.models import (
     BaseComparisonStatus,
@@ -525,6 +530,8 @@ def _collect_excerpts(
         url = f"{base_url}/actions/jobs/{check.job_id}/logs"
         try:
             text = client.get_log(url)
+        except GitHubFatalError:
+            raise
         except GitHubError:
             excerpts.append(FailureExcerpt(check_name=check.name, log_status="unavailable"))
             continue
@@ -757,6 +764,8 @@ def _mine_case(
     if failed:
         try:
             base_checks = _collect_base_checks(client, base_url, base_sha)
+        except GitHubFatalError:
+            raise
         except Exception:
             base_checks = []
         comparisons = _compare_failures(failed, base_checks)
@@ -848,6 +857,8 @@ def _mine_safely(
 ) -> Candidate | Excluded:
     try:
         return _mine_case(client, item, logs=logs, ci_status=ci_status, pr=pr)
+    except GitHubFatalError:
+        raise
     except GitHubError as exc:
         return _excluded(item, "other", detail=_exception_detail(exc))
 
@@ -889,6 +900,8 @@ def _retry_result(
 
     try:
         pr = client.get_json(f"{github.API_ROOT}/repos/{repo}/pulls/{number}")
+    except GitHubFatalError:
+        raise
     except GitHubError as exc:
         return _excluded(item, "other", detail=_exception_detail(exc))
     if not isinstance(pr, dict):
@@ -1080,6 +1093,7 @@ def mine(
     pages_per_window: int = DEFAULT_PAGES_PER_WINDOW,
     dependabot_label: str = DEFAULT_DEPENDABOT_LABEL,
     retry_excluded: list[str] | None = None,
+    max_rate_limit_wait_s: float = 900.0,
 ) -> int:
     """Mine candidates into ``out``; returns a process exit code."""
     if bot not in {"dependabot", "renovate", "both"}:
@@ -1108,7 +1122,11 @@ def mine(
         DEFAULT_SKIP_REPO_PATTERNS if skip_repo_patterns is None else skip_repo_patterns
     )
 
-    active_client = client or GitHubClient(cache_dir=cache_dir, offline=offline)
+    active_client = client or GitHubClient(
+        cache_dir=cache_dir,
+        offline=offline,
+        max_rate_limit_wait_s=max_rate_limit_wait_s,
+    )
     if logs and not active_client.token:
         raise GitHubError("--logs requires GITHUB_TOKEN")
 
@@ -1184,6 +1202,23 @@ def mine(
                 )
                 if len(candidates) >= limit:
                     break
+    except GitHubFatalError:
+        _write_jsonl(candidates_path, candidates)
+        _write_jsonl(excluded_path, excluded)
+        _write_summary(
+            out,
+            candidates,
+            excluded,
+            active_client,
+            retried=retried,
+            recovered=recovered,
+        )
+        print(
+            f"stopped after GitHub error; saved {len(candidates)} candidate(s) and "
+            f"{len(excluded)} exclusion(s) to {out}",
+            file=sys.stderr,
+        )
+        raise
     except KeyboardInterrupt:
         _write_jsonl(candidates_path, candidates)
         _write_jsonl(excluded_path, excluded)

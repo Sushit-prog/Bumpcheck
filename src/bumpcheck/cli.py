@@ -11,7 +11,7 @@ from packaging.version import InvalidVersion, Version
 
 from bumpcheck import __version__
 from bumpcheck.apidiff import ApiDiffResult, diff_versions
-from bumpcheck.bench.github import GitHubError
+from bumpcheck.bench.github import GitHubError, RateLimitWaitTooLong
 from bumpcheck.bench.inspect_case import inspect_case as run_inspect
 from bumpcheck.bench.inspect_case import redact
 from bumpcheck.bench.labels import (
@@ -24,6 +24,7 @@ from bumpcheck.bench.labels import (
 from bumpcheck.bench.mine import mine as run_mine
 from bumpcheck.check import check as run_check
 from bumpcheck.check import format_text
+from bumpcheck.envfile import EnvFileError, has_token, load_env
 from bumpcheck.lockdiff import LockParseError, parse_lock_pair
 from bumpcheck.usage import trace_usage
 from bumpcheck.verdict import at_or_above
@@ -81,6 +82,9 @@ app = typer.Typer(
 )
 
 
+MISSING_TOKEN_MESSAGE = "GITHUB_TOKEN is not set: requests are unauthenticated (60 per hour)."
+
+
 @app.callback(invoke_without_command=True)
 def main(
     version: bool = typer.Option(
@@ -90,8 +94,33 @@ def main(
         is_eager=True,
         help="Show the version and exit.",
     ),
+    verbose: bool = typer.Option(
+        False,
+        "--verbose",
+        help="Say which env file supplied GITHUB_TOKEN.",
+    ),
 ) -> None:
     """Analyze dependency bumps for breaking changes."""
+    try:
+        load_env(verbose=verbose)
+    except EnvFileError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+
+
+def _guard_github_token(*, offline: bool, allow_unauthenticated: bool) -> None:
+    if offline or has_token():
+        return
+    typer.echo(MISSING_TOKEN_MESSAGE, err=True)
+    if not allow_unauthenticated:
+        raise typer.Exit(code=2)
+
+
+def _validate_max_rate_limit_wait(seconds: float) -> float:
+    if seconds < 0:
+        typer.echo("--max-rate-limit-wait must be zero or greater", err=True)
+        raise typer.Exit(code=2)
+    return seconds
 
 
 @app.command()
@@ -370,8 +399,20 @@ def bench_mine(
         "--cache-dir",
         help="GitHub response cache directory (default .bumpcheck-cache/github).",
     ),
+    allow_unauthenticated: bool = typer.Option(
+        False,
+        "--allow-unauthenticated",
+        help="Continue without GITHUB_TOKEN instead of exiting.",
+    ),
+    max_rate_limit_wait: float = typer.Option(
+        900.0,
+        "--max-rate-limit-wait",
+        help="Longest rate-limit wait in seconds; 0 fails immediately.",
+    ),
 ) -> None:
     """Mine public Dependabot/Renovate PRs as benchmark candidates."""
+    max_wait = _validate_max_rate_limit_wait(max_rate_limit_wait)
+    _guard_github_token(offline=offline, allow_unauthenticated=allow_unauthenticated)
     try:
         since_date = date.fromisoformat(since) if since else None
         until_date = date.fromisoformat(until) if until else None
@@ -396,7 +437,11 @@ def bench_mine(
             pages_per_window=pages_per_window,
             dependabot_label=dependabot_label,
             retry_excluded=retry_excluded,
+            max_rate_limit_wait_s=max_wait,
         )
+    except RateLimitWaitTooLong as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=3) from exc
     except (GitHubError, ValueError) as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=2) from exc
@@ -543,8 +588,20 @@ def bench_inspect(
         "--cache-dir",
         help="Response cache directory (default .bumpcheck-cache/github).",
     ),
+    allow_unauthenticated: bool = typer.Option(
+        False,
+        "--allow-unauthenticated",
+        help="Continue without GITHUB_TOKEN instead of exiting.",
+    ),
+    max_rate_limit_wait: float = typer.Option(
+        900.0,
+        "--max-rate-limit-wait",
+        help="Longest rate-limit wait in seconds; 0 fails immediately.",
+    ),
 ) -> None:
     """Print a read-only inspection report for one candidate."""
+    max_wait = _validate_max_rate_limit_wait(max_rate_limit_wait)
+    _guard_github_token(offline=offline, allow_unauthenticated=allow_unauthenticated)
     try:
         report = run_inspect(
             case_id,
@@ -552,7 +609,11 @@ def bench_inspect(
             also_dirs=also_dir,
             offline=offline,
             cache_dir=cache_dir,
+            max_rate_limit_wait_s=max_wait,
         )
+    except RateLimitWaitTooLong as exc:
+        typer.echo(redact(str(exc)), err=True)
+        raise typer.Exit(code=3) from exc
     except (GitHubError, ValueError, OSError) as exc:
         typer.echo(redact(str(exc)), err=True)
         raise typer.Exit(code=2) from exc

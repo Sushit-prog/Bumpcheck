@@ -343,7 +343,10 @@ def test_also_dir_falls_back_when_primary_misses(tmp_path: Path) -> None:
 
 def test_cli_inspect_missing_case_exits_two(tmp_path: Path) -> None:
     directory = _setup(tmp_path, _candidate())
-    result = CliRunner().invoke(app, ["bench", "inspect", "missing#1", "--dir", str(directory)])
+    result = CliRunner().invoke(
+        app,
+        ["bench", "inspect", "missing#1", "--dir", str(directory), "--allow-unauthenticated"],
+    )
     assert result.exit_code == 2
     assert "candidate not found: missing#1" in result.output
     assert "Traceback" not in result.output
@@ -353,6 +356,9 @@ def test_cli_inspect_prints_report(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     import bumpcheck.cli as cli_module
 
     monkeypatch.setattr(cli_module, "run_inspect", lambda *args, **kwargs: "report\n")
-    result = CliRunner().invoke(app, ["bench", "inspect", "a/b#1", "--dir", str(tmp_path)])
+    result = CliRunner().invoke(
+        app,
+        ["bench", "inspect", "a/b#1", "--dir", str(tmp_path), "--allow-unauthenticated"],
+    )
     assert result.exit_code == 0
     assert "report" in result.output

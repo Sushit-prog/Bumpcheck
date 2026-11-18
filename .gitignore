@@ -23,6 +23,9 @@ uv.toml
 
 .bumpcheck-cache/
 
+.env
+.env.*
+
 realworld/data/
 realworld/report.*
 

@@ -4,17 +4,24 @@ import http.client
 import json
 import urllib.error
 import urllib.request
+from datetime import datetime
 from pathlib import Path
 
 import pytest
 
 from bumpcheck.bench.github import (
     USER_AGENT,
+    GitHubAuthError,
     GitHubClient,
     GitHubError,
     HttpStatusError,
     OfflineCacheMiss,
+    RateLimitWaitTooLong,
 )
+
+
+def _local(epoch: float) -> str:
+    return datetime.fromtimestamp(epoch).strftime("%Y-%m-%d %H:%M:%S") + " local"
 
 
 class Recorder:
@@ -291,8 +298,8 @@ def test_retry_after_is_used_unmodified_on_each_retry(tmp_path: Path) -> None:
     assert client.get_json(url) == {"ok": True}
     assert sleeps == [7.0, 7.0]
     assert warns == [
-        "rate limited (retry-after); sleeping 7s, retry 1/4 for /repos/o/r",
-        "rate limited (retry-after); sleeping 7s, retry 2/4 for /repos/o/r",
+        f"rate limited (retry-after); sleeping 7s until {_local(1007)}, retry 1/4 for /repos/o/r",
+        f"rate limited (retry-after); sleeping 7s until {_local(1014)}, retry 2/4 for /repos/o/r",
     ]
 
 
@@ -329,10 +336,14 @@ def test_secondary_rate_limit_403_backs_off_with_doubling(tmp_path: Path) -> Non
     assert sleeps == [60.0, 120.0, 240.0, 480.0]
     assert "secondary rate limit" in str(excinfo.value)
     assert warns == [
-        "rate limited (secondary-rate-limit); sleeping 60s, retry 1/4 for /search/issues",
-        "rate limited (secondary-rate-limit); sleeping 120s, retry 2/4 for /search/issues",
-        "rate limited (secondary-rate-limit); sleeping 240s, retry 3/4 for /search/issues",
-        "rate limited (secondary-rate-limit); sleeping 480s, retry 4/4 for /search/issues",
+        f"rate limited (secondary-rate-limit); sleeping 60s until {_local(1060)}, "
+        "retry 1/4 for /search/issues",
+        f"rate limited (secondary-rate-limit); sleeping 120s until {_local(1180)}, "
+        "retry 2/4 for /search/issues",
+        f"rate limited (secondary-rate-limit); sleeping 240s until {_local(1420)}, "
+        "retry 3/4 for /search/issues",
+        f"rate limited (secondary-rate-limit); sleeping 480s until {_local(1900)}, "
+        "retry 4/4 for /search/issues",
     ]
     assert all("test-token" not in line for line in warns)
 
@@ -349,7 +360,10 @@ def test_abuse_detection_403_is_retryable(tmp_path: Path) -> None:
 
     assert client.get_json(url) == {"ok": True}
     assert sleeps == [60.0]
-    assert warns == ["rate limited (abuse-detection); sleeping 60s, retry 1/4 for /repos/o/r"]
+    assert warns == [
+        f"rate limited (abuse-detection); sleeping 60s until {_local(1060)}, "
+        "retry 1/4 for /repos/o/r"
+    ]
 
 
 def test_plain_403_fails_immediately_with_message(tmp_path: Path) -> None:
@@ -452,3 +466,99 @@ def test_external_requests_carry_no_authorization_including_redirect(
     first_headers = captured[0][1]
     user_agents = [value for name, value in first_headers.items() if name.lower() == "user-agent"]
     assert user_agents == [USER_AGENT]
+
+
+def test_wait_over_limit_raises_before_sleeping(tmp_path: Path) -> None:
+    url = "https://api.github.com/repos/o/r"
+    recorder = Recorder(
+        {url: (403, {"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "4600"}, b"")}
+    )
+    sleeps: list[float] = []
+    client = _client(recorder, tmp_path, sleeps=sleeps, max_rate_limit_wait_s=900)
+
+    with pytest.raises(RateLimitWaitTooLong) as excinfo:
+        client.get_bytes(url)
+
+    message = str(excinfo.value)
+    assert "60.0 minutes" in message
+    assert _local(4600) in message
+    assert "re-run after that time, or pass --max-rate-limit-wait SECONDS to wait" in message
+    assert sleeps == []
+    assert len(recorder.calls) == 1
+
+
+def test_wait_within_custom_limit_sleeps(tmp_path: Path) -> None:
+    url = "https://api.github.com/repos/o/r"
+    route = _repeating([(429, {"Retry-After": "7"}, b""), (200, {}, b'{"ok": true}')])
+    sleeps: list[float] = []
+    client = _client(Recorder({url: route}), tmp_path, sleeps=sleeps, max_rate_limit_wait_s=10)
+
+    assert client.get_json(url) == {"ok": True}
+    assert sleeps == [7.0]
+
+
+def test_zero_max_wait_fails_immediately(tmp_path: Path) -> None:
+    url = "https://api.github.com/repos/o/r"
+    recorder = Recorder({url: (429, {"Retry-After": "7"}, b"")})
+    sleeps: list[float] = []
+    client = _client(recorder, tmp_path, sleeps=sleeps, max_rate_limit_wait_s=0)
+
+    with pytest.raises(RateLimitWaitTooLong):
+        client.get_bytes(url)
+
+    assert sleeps == []
+    assert len(recorder.calls) == 1
+
+
+def test_exhausted_quota_caches_response_then_next_request_raises(tmp_path: Path) -> None:
+    first = "https://api.github.com/repos/o/r"
+    second = "https://api.github.com/repos/o/other"
+    recorder = Recorder(
+        {
+            first: (200, {"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "8200"}, b'{"ok": 1}'),
+            second: (200, {}, b'{"ok": 2}'),
+        }
+    )
+    sleeps: list[float] = []
+    client = _client(recorder, tmp_path, sleeps=sleeps, max_rate_limit_wait_s=900)
+
+    assert client.get_json(first) == {"ok": 1}
+    cached = client._load_cache(first)
+    assert cached is not None
+    assert cached["body"] == b'{"ok": 1}'
+    assert sleeps == []
+
+    with pytest.raises(RateLimitWaitTooLong) as excinfo:
+        client.get_json(second)
+
+    assert "120.0 minutes" in str(excinfo.value)
+    assert _local(8200) in str(excinfo.value)
+    assert len(recorder.calls) == 1
+
+
+def test_401_with_request_authorization_raises_auth_error(tmp_path: Path) -> None:
+    url = "https://api.github.com/repos/o/r"
+    recorder = Recorder({url: (401, {}, b'{"message": "Bad credentials"}')})
+    client = _client(recorder, tmp_path, token="super-secret-token")
+
+    with pytest.raises(GitHubAuthError) as excinfo:
+        client.get_bytes(url)
+
+    assert (
+        str(excinfo.value) == "GitHub rejected the token (401): it is missing, expired or revoked"
+    )
+    assert "super-secret-token" not in str(excinfo.value)
+    assert recorder.calls[0]["headers"]["Authorization"] == "Bearer super-secret-token"
+    assert len(recorder.calls) == 1
+
+
+def test_401_without_request_authorization_stays_http_status_error(tmp_path: Path) -> None:
+    url = "https://api.github.com/repos/o/r"
+    recorder = Recorder({url: (401, {}, b"")})
+    client = _client(recorder, tmp_path, token="")
+
+    with pytest.raises(HttpStatusError) as excinfo:
+        client.get_bytes(url)
+
+    assert excinfo.value.status == 401
+    assert "Authorization" not in recorder.calls[0]["headers"]

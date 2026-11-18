@@ -19,7 +19,12 @@ from packaging.utils import canonicalize_name
 from packaging.version import Version
 
 from bumpcheck.bench import github
-from bumpcheck.bench.github import GitHubClient, GitHubError, HttpStatusError
+from bumpcheck.bench.github import (
+    GitHubClient,
+    GitHubError,
+    GitHubFatalError,
+    HttpStatusError,
+)
 from bumpcheck.bench.labels import load_candidates
 from bumpcheck.bench.mine import FAILURE_CONCLUSIONS
 from bumpcheck.pycompat import allows_python, normalize_python_version, python_floor
@@ -97,6 +102,8 @@ def _resolve_repos(client: GitHubClient, candidate: dict[str, Any]) -> tuple[str
         return repo, repo
     try:
         payload = client.get_json(f"{github.API_ROOT}/repos/{repo}/pulls/{number}")
+    except GitHubFatalError:
+        raise
     except (GitHubError, OSError, ValueError):
         return repo, repo
     if not isinstance(payload, dict):
@@ -149,6 +156,8 @@ def _fetch_pypi(
     try:
         body = fetch(url)
         payload = json.loads(body.decode("utf-8"))
+    except GitHubFatalError:
+        raise
     except (GitHubError, OSError, ValueError, UnicodeDecodeError):
         return None
     if not isinstance(payload, dict):
@@ -314,6 +323,8 @@ def _fetch_workflows(
     )
     try:
         payload = client.get_json(url)
+    except GitHubFatalError:
+        raise
     except (GitHubError, OSError, ValueError):
         return [], [], False
     if not isinstance(payload, list):
@@ -336,6 +347,8 @@ def _fetch_workflows(
             continue
         try:
             file_payload = client.get_json(content_url)
+        except GitHubFatalError:
+            raise
         except (GitHubError, OSError, ValueError):
             failures.append(file_name)
             continue
@@ -569,6 +582,8 @@ def _lockfile_lines(
         lines.append(f"  {path}:")
         try:
             diff = _lockfile_diff(client, base_repo, head_repo, path, base_sha, head_sha, package)
+        except GitHubFatalError:
+            raise
         except (GitHubError, OSError, ValueError):
             diff = None
         if diff is None:
@@ -659,10 +674,15 @@ def inspect_case(
     cache_dir: Path | None = None,
     client: GitHubClient | None = None,
     pypi_fetch: Callable[[str], bytes] | None = None,
+    max_rate_limit_wait_s: float = 900.0,
 ) -> str:
     """Render a read-only inspection report for one candidate."""
     candidate, _ = find_candidate(case_id, dir, also_dirs)
-    active_client = client or GitHubClient(cache_dir=cache_dir, offline=offline)
+    active_client = client or GitHubClient(
+        cache_dir=cache_dir,
+        offline=offline,
+        max_rate_limit_wait_s=max_rate_limit_wait_s,
+    )
     package = str(candidate.get("package") or "")
     old_version = candidate.get("old_version")
     new_version = candidate.get("new_version")

@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 import bumpcheck.bench.mine as bench_mine
-from bumpcheck.bench.github import GitHubClient, GitHubError
+from bumpcheck.bench.github import GitHubClient, GitHubError, GitHubFatalError
 from bumpcheck.bench.mine import _iter_window, mine, search_url
 
 OWNER = "acme"
@@ -1511,3 +1511,38 @@ def test_renovate_autoclosed_candidate_is_flagged(tmp_path: Path) -> None:
         cache_name="cache2",
     )
     assert plain["autoclosed"] is False
+
+
+class FatalOnSecondPR(FakeGitHub):
+    def __call__(self, method: str, url: str, headers: dict) -> tuple:
+        path = urllib.parse.urlparse(url).path
+        if path == "/search/issues":
+            self.calls.append({"url": url, "headers": dict(headers)})
+            second = dict(self.search_item)
+            second["number"] = 2
+            second["html_url"] = f"https://github.com/{REPO_FULL}/pull/2"
+            return _json({"total_count": 2, "items": [self.search_item, second]})
+        if path.startswith(f"/repos/{REPO_FULL}/pulls/2"):
+            self.calls.append({"url": url, "headers": dict(headers)})
+            raise GitHubFatalError(
+                "GitHub rejected the token (401): it is missing, expired or revoked"
+            )
+        return super().__call__(method, url, headers)
+
+
+def test_fatal_error_mid_run_saves_progress_then_raises(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(GitHubFatalError):
+        _mine_into(tmp_path, FatalOnSecondPR(), limit=2)
+
+    out = tmp_path / "out"
+    candidates = _read_jsonl(out / "candidates.jsonl")
+    assert [candidate["case_id"] for candidate in candidates] == [f"{REPO_FULL}#1"]
+    assert _read_jsonl(out / "excluded.jsonl") == []
+    summary = json.loads((out / "summary.json").read_text(encoding="utf-8"))
+    assert summary["kept"] == 1
+    assert summary["excluded"] == 0
+
+    err = capsys.readouterr().err
+    assert "stopped after GitHub error; saved 1 candidate(s) and 0 exclusion(s)" in err

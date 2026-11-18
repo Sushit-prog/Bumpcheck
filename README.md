@@ -234,11 +234,14 @@ commits dated at or before the merge/close time are filtered out.
 Responses are cached under `.bumpcheck-cache/github/` (override with
 `--cache-dir`), and `--offline` replays a warm cache without touching the
 network. `GITHUB_TOKEN` is optional but required for `--logs` and for usable
-rate limits; it is never written to the cache or to any output file. Requests are
+rate limits (see [Credentials](#credentials)); it is never written to the cache
+or to any output file. Requests are
 spaced at least 1 second apart (search at least 3), transient network errors
 are retried up to four times with jittered exponential backoff, and
 rate-limit 403/429 responses are retried with the API's own retry hint (or a
 doubling backoff, up to four retries) before failing with the API's message.
+A computed rate-limit wait longer than `--max-rate-limit-wait` (default 900
+seconds) is not attempted: the command exits 3 with the reset time instead.
 Rerunning
 into the same `--out` skips cases that are already recorded; `--limit` counts
 those earlier candidates too. Each processed PR prints one progress line to
@@ -307,6 +310,42 @@ for failing checks. `--also-dir DIR` (repeatable) falls back to other candidate
 stores when the case is missing from `--dir`. `--offline` replays the response
 cache only; `--cache-dir` selects the cache directory (default
 `.bumpcheck-cache/github`).
+
+## Credentials
+
+GitHub commands read `GITHUB_TOKEN` from a `.env`-style file at startup. Files
+are checked in this order, and the first non-empty token wins:
+
+1. the file named by `BUMPCHECK_ENV_FILE` (it must exist, or the command exits 2)
+2. `~/.bumpcheck/.env`
+3. `./.env` in the current directory (last, so a cloned repo cannot override
+   your own token)
+
+A non-empty `GITHUB_TOKEN` already in the real environment always wins over
+every file; an empty or whitespace-only value counts as unset. Only
+`GITHUB_TOKEN` is ever read from these files: every other key (`PATH`,
+`PYTHONPATH`, proxy variables, ...) is ignored, so a hostile repository cannot
+change how the command runs. Values are used verbatim: no variable expansion
+and no multi-line values. On POSIX, a file readable by group or others prints a
+one-line warning; restrict it with `chmod 600`.
+
+Without a token, requests are unauthenticated (60 per hour). `bench mine` and
+`bench inspect` print a warning and exit 2 unless you pass
+`--allow-unauthenticated`; `--offline` skips the check entirely. A token that
+GitHub rejects (401) exits 2 with a clear message. Use
+`--max-rate-limit-wait SECONDS` (default 900, `0` fails immediately) to cap
+rate-limit waits; exceeding it exits 3 and prints the reset time. Run
+`bumpcheck --verbose ...` to see which file supplied the token (the value is
+never printed).
+
+```
+# ~/.bumpcheck/.env, outside any repository you commit
+GITHUB_TOKEN=ghp_your_token_here
+```
+
+Never commit the file. This project's `.gitignore` already ignores `.env` and
+`.env.*`; keep the token in `~/.bumpcheck/.env` or point
+`BUMPCHECK_ENV_FILE` at a file outside the repository.
 
 ## Acceptance run
 
