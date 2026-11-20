@@ -11,7 +11,7 @@ import urllib.parse
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from packaging.requirements import InvalidRequirement, Requirement
@@ -27,7 +27,13 @@ from bumpcheck.bench.github import (
 )
 from bumpcheck.bench.labels import load_candidates
 from bumpcheck.bench.mine import FAILURE_CONCLUSIONS
-from bumpcheck.pycompat import allows_python, normalize_python_version, python_floor
+from bumpcheck.pycompat import (
+    ConcretePythonVersion,
+    NonConcretePythonVersion,
+    allows_python,
+    interpret_python_version,
+    python_floor,
+)
 
 PYPI_JSON_URL = "https://pypi.org/pypi/{name}/{version}/json"
 WORKFLOW_DIR = ".github/workflows"
@@ -37,6 +43,16 @@ _RUN_TOOL_RE = re.compile(
 )
 _URL_QUERY_RE = re.compile(r"(https?://[^\s?#]+)\?[^\s]*")
 _CREDENTIAL_RE = re.compile(r"(https?://)[^/\s:@]+:[^/\s@]+@")
+_MATRIX_EXPRESSION_RE = re.compile(r"\$\{\{\s*matrix\.([A-Za-z0-9_-]+)\s*\}\}")
+_PLAIN_FLOAT_RE = re.compile(r"(\d+)\.(\d+)")
+_VERSION_KEYS = frozenset({"python-version", "python-version-file"})
+
+
+@dataclass(frozen=True)
+class VersionScalar:
+    raw: str
+    style: str | None
+    source: Literal["version", "file"] = "version"
 
 
 @dataclass(frozen=True)
@@ -50,7 +66,7 @@ class PypiInfo:
 class WorkflowJob:
     job_id: str
     name: str | None
-    python_versions: tuple[str, ...]
+    python_versions: tuple[VersionScalar, ...]
     run_lines: tuple[str, ...]
 
 
@@ -239,46 +255,151 @@ def _workflow_triggers(document: dict[str, Any]) -> tuple[str, ...]:
     return (str(raw),)
 
 
-def _python_version_values(node: Any) -> tuple[str, ...]:
-    values: list[str] = []
+def _normalize_key(value: object) -> str:
+    return str(value).strip().lower().replace("_", "-")
 
-    def collect(value: Any) -> None:
-        if isinstance(value, str):
-            values.append(value)
-        elif isinstance(value, bool):
+
+def _raw_scalars(
+    node: yaml.Node,
+    source: Literal["version", "file"] = "version",
+) -> tuple[VersionScalar, ...]:
+    scalars: list[VersionScalar] = []
+
+    def collect(current: yaml.Node) -> None:
+        if isinstance(current, yaml.ScalarNode):
+            scalars.append(VersionScalar(raw=current.value, style=current.style, source=source))
+        elif isinstance(current, yaml.SequenceNode):
+            for item in current.value:
+                collect(item)
+        elif isinstance(current, yaml.MappingNode):
+            for _, item in current.value:
+                collect(item)
+
+    collect(node)
+    return tuple(dict.fromkeys(scalars))
+
+
+def _matrix_values(matrix: yaml.Node) -> dict[str, tuple[VersionScalar, ...]]:
+    values: dict[str, list[VersionScalar]] = {}
+
+    def add(key_node: yaml.Node, value_node: yaml.Node) -> None:
+        if not isinstance(key_node, yaml.ScalarNode):
             return
-        elif isinstance(value, (int, float)):
-            values.append(str(value))
-        elif isinstance(value, list):
-            for item in value:
-                collect(item)
-        elif isinstance(value, dict):
-            for item in value.values():
-                collect(item)
+        key = _normalize_key(key_node.value)
+        values.setdefault(key, []).extend(_raw_scalars(value_node))
 
-    def visit(current: Any) -> None:
-        if isinstance(current, dict):
-            for key, value in current.items():
-                if str(key).lower().replace("_", "-") == "python-version":
-                    collect(value)
-                else:
-                    visit(value)
-        elif isinstance(current, list):
-            for item in current:
-                visit(item)
+    def add_mapping(mapping: yaml.MappingNode) -> None:
+        for key, value in mapping.value:
+            if isinstance(key, yaml.ScalarNode) and key.value == "<<":
+                if isinstance(value, yaml.MappingNode):
+                    add_mapping(value)
+                elif isinstance(value, yaml.SequenceNode):
+                    for item in value.value:
+                        if isinstance(item, yaml.MappingNode):
+                            add_mapping(item)
+                continue
+            add(key, value)
 
-    visit(node)
-    return tuple(dict.fromkeys(values))
+    if isinstance(matrix, yaml.MappingNode):
+        for key, value in matrix.value:
+            normalized = _normalize_key(key.value) if isinstance(key, yaml.ScalarNode) else ""
+            if normalized == "include" and isinstance(value, yaml.SequenceNode):
+                for item in value.value:
+                    if isinstance(item, yaml.MappingNode):
+                        add_mapping(item)
+            else:
+                add(key, value)
+    return {key: tuple(dict.fromkeys(items)) for key, items in values.items()}
+
+
+def _resolve_matrix_expression(
+    node: yaml.Node,
+    matrix_values: dict[str, tuple[VersionScalar, ...]],
+) -> tuple[VersionScalar, ...] | None:
+    scalars = _raw_scalars(node)
+    if len(scalars) != 1:
+        return None
+    match = _MATRIX_EXPRESSION_RE.fullmatch(scalars[0].raw)
+    if match is None:
+        return None
+    return matrix_values.get(_normalize_key(match.group(1))) or None
+
+
+def _python_version_values(
+    job_node: yaml.Node,
+    matrix_values: dict[str, tuple[VersionScalar, ...]],
+) -> tuple[VersionScalar, ...]:
+    scalars: list[VersionScalar] = []
+
+    def visit(current: yaml.Node, in_matrix: bool) -> None:
+        if isinstance(current, yaml.SequenceNode):
+            for item in current.value:
+                visit(item, in_matrix)
+            return
+        if not isinstance(current, yaml.MappingNode):
+            return
+        for key, value in current.value:
+            if not isinstance(key, yaml.ScalarNode):
+                visit(value, in_matrix)
+                continue
+            normalized = _normalize_key(key.value)
+            if normalized in _VERSION_KEYS:
+                source = "file" if normalized == "python-version-file" else "version"
+                resolved = (
+                    _resolve_matrix_expression(value, matrix_values)
+                    if source == "version" and not in_matrix
+                    else None
+                )
+                scalars.extend(resolved if resolved is not None else _raw_scalars(value, source))
+                continue
+            visit(value, in_matrix or normalized == "matrix")
+
+    visit(job_node, False)
+    return tuple(dict.fromkeys(scalars))
+
+
+def _job_matrix_node(job_node: yaml.Node) -> yaml.Node | None:
+    if not isinstance(job_node, yaml.MappingNode):
+        return None
+    for key, value in job_node.value:
+        if not isinstance(key, yaml.ScalarNode) or _normalize_key(key.value) != "strategy":
+            continue
+        if not isinstance(value, yaml.MappingNode):
+            continue
+        for strategy_key, strategy_value in value.value:
+            if (
+                isinstance(strategy_key, yaml.ScalarNode)
+                and _normalize_key(strategy_key.value) == "matrix"
+            ):
+                return strategy_value
+    return None
+
+
+def _composed_jobs(root: yaml.Node | None) -> dict[str, yaml.Node]:
+    if not isinstance(root, yaml.MappingNode):
+        return {}
+    for key, value in root.value:
+        if not isinstance(key, yaml.ScalarNode) or _normalize_key(key.value) != "jobs":
+            continue
+        if isinstance(value, yaml.MappingNode):
+            return {
+                job_key.value: job_value
+                for job_key, job_value in value.value
+                if isinstance(job_key, yaml.ScalarNode)
+            }
+    return {}
 
 
 def _parse_workflow(path: str, text: str) -> WorkflowFile | None:
     try:
         document = yaml.safe_load(text)
+        root = yaml.compose(text)
     except yaml.YAMLError:
         return None
     if not isinstance(document, dict):
         return None
     triggers = _workflow_triggers(document)
+    composed_jobs = _composed_jobs(root)
     jobs: list[WorkflowJob] = []
     raw_jobs = document.get("jobs")
     if isinstance(raw_jobs, dict):
@@ -287,9 +408,12 @@ def _parse_workflow(path: str, text: str) -> WorkflowFile | None:
             if not isinstance(job, dict):
                 continue
             name = job.get("name")
-            strategy = job.get("strategy")
-            matrix = strategy.get("matrix") if isinstance(strategy, dict) else None
-            versions = _python_version_values(matrix) if isinstance(matrix, dict) else ()
+            job_node = composed_jobs.get(str(job_id))
+            versions: tuple[VersionScalar, ...] = ()
+            if job_node is not None:
+                matrix_node = _job_matrix_node(job_node)
+                matrix_values = _matrix_values(matrix_node) if matrix_node is not None else {}
+                versions = _python_version_values(job_node, matrix_values)
             runs: list[str] = []
             steps = job.get("steps")
             if isinstance(steps, list):
@@ -466,10 +590,13 @@ def infer_check_location(
             if name and (name == lowered or name in lowered):
                 score += 2
             matched_version = None
-            for version in job.python_versions:
-                if _version_in_name(version, check_name):
+            for scalar in job.python_versions:
+                result = interpret_python_version(scalar.raw, source=scalar.source)
+                if not isinstance(result, ConcretePythonVersion):
+                    continue
+                if _version_in_name(scalar.raw, check_name):
                     score += 1
-                    matched_version = version
+                    matched_version = scalar.raw
                     break
             if score <= 0:
                 continue
@@ -532,6 +659,29 @@ def _pypi_lines(old_info: PypiInfo | None, new_info: PypiInfo | None) -> list[st
     return lines
 
 
+def _unquoted_float_warning(scalar: VersionScalar) -> str | None:
+    if scalar.style is not None:
+        return None
+    match = _PLAIN_FLOAT_RE.fullmatch(scalar.raw)
+    if match is None:
+        return None
+    major, minor = match.groups()
+    if not minor.endswith("0"):
+        return None
+    as_float_minor = minor.rstrip("0") or "0"
+    return f"(unquoted: Actions reads this as {major}.{as_float_minor})"
+
+
+def _format_version_scalar(scalar: VersionScalar) -> str:
+    result = interpret_python_version(scalar.raw, source=scalar.source)
+    if isinstance(result, NonConcretePythonVersion):
+        return f"{scalar.raw} (non-concrete)"
+    warning = _unquoted_float_warning(scalar)
+    if warning is not None:
+        return f"{scalar.raw} {warning}"
+    return scalar.raw
+
+
 def _workflow_lines(files: list[WorkflowFile], failures: list[str], listing_ok: bool) -> list[str]:
     if not listing_ok:
         return ["workflows: unavailable"]
@@ -550,7 +700,11 @@ def _workflow_lines(files: list[WorkflowFile], failures: list[str], listing_ok: 
             lines.append(f"      {job.job_id}")
             if job.name:
                 lines.append(f"        name: {job.name}")
-            versions = ", ".join(job.python_versions) if job.python_versions else "none"
+            versions = (
+                ", ".join(_format_version_scalar(scalar) for scalar in job.python_versions)
+                if job.python_versions
+                else "none"
+            )
             lines.append(f"        python-version matrix: {versions}")
             lines.append("        run:")
             if job.run_lines:
@@ -604,22 +758,34 @@ def _verdict_lines(
     repo_requires_python: str | None,
 ) -> list[str]:
     versions: dict[Version, str] = {}
+    non_concrete: list[str] = []
     for workflow in workflows:
         for job in workflow.jobs:
-            for raw in job.python_versions:
-                version = normalize_python_version(raw)
-                if version is not None:
-                    versions.setdefault(version, str(version))
+            for scalar in job.python_versions:
+                result = interpret_python_version(scalar.raw, source=scalar.source)
+                if isinstance(result, NonConcretePythonVersion):
+                    line = (
+                        f"  Python {scalar.raw}: non-concrete ({result.reason}); "
+                        "requires-python not evaluated"
+                    )
+                    non_concrete.append(line)
+                    continue
+                version = result.as_version()
+                label = str(version)
+                warning = _unquoted_float_warning(scalar)
+                if warning is not None:
+                    label = f"{version} {warning}"
+                versions.setdefault(version, label)
     if repo_requires_python:
         floor = python_floor(repo_requires_python)
         if floor is not None:
             versions.setdefault(floor, str(floor))
-    if not versions:
+    if not versions and not non_concrete:
         return ["verdict hints: none"]
     new_spec = new_info.requires_python if new_info else None
     old_spec = old_info.requires_python if old_info else None
     lines = ["verdict hints:"]
-    for version in sorted(versions):
+    for version, label in sorted(versions.items()):
         new_allowed = allows_python(new_spec, version)
         if new_allowed is None:
             new_state = "unknown (requires_python unavailable)"
@@ -637,7 +803,8 @@ def _verdict_lines(
                 old_state = "allowed"
             else:
                 old_state = f"NOT allowed (requires {old_spec})"
-        lines.append(f"  Python {version}: new version {new_state}; old version {old_state}")
+        lines.append(f"  Python {label}: new version {new_state}; old version {old_state}")
+    lines.extend(dict.fromkeys(non_concrete))
     return lines
 
 

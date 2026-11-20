@@ -14,6 +14,7 @@ from bumpcheck.bench.inspect_case import PYPI_JSON_URL, inspect_case
 from bumpcheck.cli import app
 
 FIXTURE = Path(__file__).parent / "fixtures" / "workflows" / "pylint.yml"
+UNQUOTED_FIXTURE = Path(__file__).parent / "fixtures" / "workflows" / "unquoted_python.yml"
 API = "https://api.github.com"
 RAW = "https://raw.githubusercontent.com/acme/widgets"
 REPO = "acme/widgets"
@@ -362,3 +363,226 @@ def test_cli_inspect_prints_report(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     )
     assert result.exit_code == 0
     assert "report" in result.output
+
+
+def test_unquoted_python_matrix_regression(tmp_path: Path) -> None:
+    json_responses, bytes_responses = _responses(
+        workflow_text=UNQUOTED_FIXTURE.read_text(encoding="utf-8"),
+        pyproject='[project]\nrequires-python = ">=3.8"\n',
+    )
+    report = _inspect(
+        tmp_path,
+        _candidate(),
+        json_responses=json_responses,
+        bytes_responses=bytes_responses,
+    )
+    assert "python-version matrix: 3.8, 3.9, 3.10 (unquoted: Actions reads this as 3.1)" in report
+    assert "Python 3.8: new version NOT allowed (requires >=3.10); old version allowed" in report
+    assert "Python 3.9: new version NOT allowed (requires >=3.10); old version allowed" in report
+    assert (
+        "Python 3.10 (unquoted: Actions reads this as 3.1): new version allowed; "
+        "old version allowed"
+    ) in report
+    assert "Python 3.1:" not in report
+
+
+def test_quoted_versions_and_extended_classifications(tmp_path: Path) -> None:
+    workflow_text = """\
+name: Versions
+on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version:
+          - "3.10"
+          - "3.1"
+          - "3.x"
+          - "3.13t"
+          - "3.14-dev"
+          - "3.12.0-rc.1"
+          - "3.11.0-beta.2"
+          - ">=3.9"
+          - "~3.10"
+          - "3.9 - 3.11"
+          - "pypy-3.10"
+          - "cpython-3.9"
+          - "stable"
+          - "${{ inputs.v }}"
+    steps:
+      - run: pytest -q
+"""
+    json_responses, bytes_responses = _responses(workflow_text=workflow_text)
+    report = _inspect(
+        tmp_path,
+        _candidate(),
+        json_responses=json_responses,
+        bytes_responses=bytes_responses,
+    )
+    assert "python-version matrix: 3.10, 3.1, 3.x (non-concrete), 3.13t" in report
+    assert "3.14-dev, 3.12.0-rc.1, 3.11.0-beta.2" in report
+    assert ">=3.9 (non-concrete), ~3.10 (non-concrete)" in report
+    assert "pypy-3.10 (non-concrete), cpython-3.9 (non-concrete)" in report
+    assert "stable (non-concrete), ${{ inputs.v }} (non-concrete)" in report
+    assert "3.10 (unquoted" not in report
+    assert "Python 3.1: new version" in report
+    assert "Python 3.x: non-concrete (wildcard); requires-python not evaluated" in report
+    assert "Python >=3.9: non-concrete (range); requires-python not evaluated" in report
+    assert "Python 3.9 - 3.11: non-concrete (range); requires-python not evaluated" in report
+    assert (
+        "Python pypy-3.10: non-concrete (implementation); requires-python not evaluated"
+    ) in report
+    assert "Python stable: non-concrete (alias); requires-python not evaluated" in report
+    assert (
+        "Python ${{ inputs.v }}: non-concrete (expression); requires-python not evaluated"
+    ) in report
+    assert "Python 3.0:" not in report
+
+
+def test_setup_python_expression_resolves_normalized_matrix_keys(tmp_path: Path) -> None:
+    workflow_text = """\
+name: Resolve
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        Py_Version: ["3.12"]
+        include:
+          - py_version: "3.13"
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.py-version }}
+      - run: pytest -q
+"""
+    json_responses, bytes_responses = _responses(workflow_text=workflow_text)
+    report = _inspect(
+        tmp_path,
+        _candidate(),
+        json_responses=json_responses,
+        bytes_responses=bytes_responses,
+    )
+    assert "python-version matrix: 3.12, 3.13" in report
+    assert "${{" not in report
+    assert "Python 3.13: new version" in report
+
+
+def test_matrix_include_and_exclude_entries_are_reported(tmp_path: Path) -> None:
+    workflow_text = """\
+name: Matrix
+on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.9"]
+        include:
+          - python-version: "3.10"
+        exclude:
+          - python-version: "3.11"
+    steps:
+      - run: pytest -q
+"""
+    json_responses, bytes_responses = _responses(workflow_text=workflow_text)
+    report = _inspect(
+        tmp_path,
+        _candidate(),
+        json_responses=json_responses,
+        bytes_responses=bytes_responses,
+    )
+    assert "python-version matrix: 3.9, 3.10, 3.11" in report
+
+
+def test_python_version_file_key_is_non_concrete(tmp_path: Path) -> None:
+    workflow_text = """\
+name: File
+on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version-file: ".python-version"
+      - run: pytest -q
+"""
+    json_responses, bytes_responses = _responses(workflow_text=workflow_text)
+    report = _inspect(
+        tmp_path,
+        _candidate(),
+        json_responses=json_responses,
+        bytes_responses=bytes_responses,
+    )
+    assert "python-version matrix: .python-version (non-concrete)" in report
+    assert "Python .python-version: non-concrete (file); requires-python not evaluated" in report
+
+
+def test_yaml_anchors_and_merge_keys_degrade_gracefully(tmp_path: Path) -> None:
+    workflow_text = """\
+name: Aliases
+on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults: &defaults
+      python-version: "3.11"
+    strategy:
+      matrix:
+        python-version: [&py "3.10"]
+        include:
+          - <<: *defaults
+          - python-version: *py
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: pytest -q
+"""
+    json_responses, bytes_responses = _responses(workflow_text=workflow_text)
+    report = _inspect(
+        tmp_path,
+        _candidate(),
+        json_responses=json_responses,
+        bytes_responses=bytes_responses,
+    )
+    assert "python-version matrix: 3.11, 3.10" in report
+    assert "pylint.yml: unavailable" not in report
+    assert "Python 3.11: new version" in report
+    assert "Python 3.10: new version" in report
+
+
+def test_malformed_yaml_degrades_gracefully(tmp_path: Path) -> None:
+    workflow_text = "jobs:\n  test:\n    strategy:\n      matrix: [3.10\n"
+    json_responses, bytes_responses = _responses(workflow_text=workflow_text)
+    report = _inspect(
+        tmp_path,
+        _candidate(),
+        json_responses=json_responses,
+        bytes_responses=bytes_responses,
+    )
+    assert "pylint.yml: unavailable" in report
+    assert "Traceback" not in report
+
+
+def test_workflow_without_python_matrix_reports_none(tmp_path: Path) -> None:
+    workflow_text = """\
+name: Docs
+on: push
+jobs:
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+"""
+    json_responses, bytes_responses = _responses(workflow_text=workflow_text)
+    report = _inspect(
+        tmp_path,
+        _candidate(),
+        json_responses=json_responses,
+        bytes_responses=bytes_responses,
+    )
+    assert "python-version matrix: none" in report

@@ -4,39 +4,113 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable
+from dataclasses import dataclass
+from typing import Literal
 
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.version import InvalidVersion, Version
 
+NonConcreteReason = Literal[
+    "wildcard",
+    "expression",
+    "alias",
+    "range",
+    "implementation",
+    "file",
+    "unparsable",
+]
+
+_VERSION_FILE_RE = re.compile(r"python[-_]version[-_]file", re.IGNORECASE)
+_WILDCARD_RE = re.compile(r"\d+\.[xX*](?:\.[A-Za-z0-9*]+)*")
+_CONCRETE_RE = re.compile(
+    r"(\d+)\.(\d+)(?:\.\d+)?(?:[tT]|[-_][A-Za-z0-9][A-Za-z0-9.]*)?",
+    re.IGNORECASE,
+)
+_IMPLEMENTATION_RE = re.compile(r"(?:pypy|cpython)-", re.IGNORECASE)
+_ALIASES = frozenset({"stable", "latest"})
+
+
+@dataclass(frozen=True)
+class ConcretePythonVersion:
+    major: int
+    minor: int
+
+    def as_version(self) -> Version:
+        return Version(f"{self.major}.{self.minor}")
+
+
+@dataclass(frozen=True)
+class NonConcretePythonVersion:
+    raw: str
+    reason: NonConcreteReason
+
+
+PythonVersionResult = ConcretePythonVersion | NonConcretePythonVersion
+PythonVersionInput = str | Version | PythonVersionResult
+
+
+def interpret_python_version(
+    value: object,
+    *,
+    source: Literal["version", "file"] = "version",
+) -> PythonVersionResult:
+    """Interpret a version scalar without fabricating a concrete version."""
+    raw = value.strip() if isinstance(value, str) else ""
+    if source == "file" or _VERSION_FILE_RE.fullmatch(raw):
+        return NonConcretePythonVersion(raw=raw, reason="file")
+    if not raw:
+        return NonConcretePythonVersion(raw=raw, reason="unparsable")
+    if "${{" in raw or "}}" in raw:
+        return NonConcretePythonVersion(raw=raw, reason="expression")
+    if raw.lower() in _ALIASES:
+        return NonConcretePythonVersion(raw=raw, reason="alias")
+    if _IMPLEMENTATION_RE.match(raw):
+        return NonConcretePythonVersion(raw=raw, reason="implementation")
+    if (
+        any(token in raw for token in (">", "<", "=", "~", ",", "||"))
+        or re.search(r"\s+-\s+", raw) is not None
+    ):
+        return NonConcretePythonVersion(raw=raw, reason="range")
+    if re.fullmatch(r"\d+", raw) or _WILDCARD_RE.fullmatch(raw):
+        return NonConcretePythonVersion(raw=raw, reason="wildcard")
+    match = _CONCRETE_RE.fullmatch(raw)
+    if match is not None:
+        return ConcretePythonVersion(major=int(match.group(1)), minor=int(match.group(2)))
+    return NonConcretePythonVersion(raw=raw, reason="unparsable")
+
+
+def _as_version(value: PythonVersionInput) -> Version | None:
+    if isinstance(value, Version):
+        return value
+    if isinstance(value, ConcretePythonVersion):
+        return value.as_version()
+    if isinstance(value, NonConcretePythonVersion):
+        return None
+    if isinstance(value, str):
+        return normalize_python_version(value)
+    return None
+
 
 def normalize_python_version(text: str) -> Version | None:
-    """Parse a Python version value such as "3.9", "3.x" or "3.9.1"."""
-    value = str(text).strip()
-    if not value:
-        return None
-    if value.lower().endswith(".x"):
-        value = f"{value[:-2]}.0"
-    elif re.fullmatch(r"\d+", value):
-        value = f"{value}.0"
-    try:
-        return Version(value)
-    except InvalidVersion:
-        return None
+    """Parse a concrete Python version; non-concrete values yield None."""
+    result = interpret_python_version(text)
+    if isinstance(result, ConcretePythonVersion):
+        return result.as_version()
+    return None
 
 
-def allows_python(requires_python: str | None, python_version: str | Version) -> bool | None:
+def allows_python(
+    requires_python: str | None,
+    python_version: PythonVersionInput,
+) -> bool | None:
     """Whether a requires-python spec allows a version.
 
     Returns None when the spec is missing or malformed, or when the version
-    cannot be parsed. Never raises.
+    is non-concrete. Never raises.
     """
     if not isinstance(requires_python, str) or not requires_python.strip():
         return None
-    version = (
-        python_version
-        if isinstance(python_version, Version)
-        else normalize_python_version(str(python_version))
-    )
+    version = _as_version(python_version)
     if version is None:
         return None
     try:
@@ -68,16 +142,16 @@ def python_floor(requires_python: str | None) -> Version | None:
 def newly_disallowed(
     old_requires: str | None,
     new_requires: str | None,
-    versions: Iterable[str | Version],
+    versions: Iterable[PythonVersionInput],
 ) -> list[str]:
     """Versions the old spec allows and the new spec no longer allows.
 
-    Versions that cannot be parsed are skipped. Missing or malformed specs
-    yield an empty list. Never raises.
+    Non-concrete versions are skipped. Missing or malformed specs yield an
+    empty list. Never raises.
     """
     result: list[str] = []
     for raw in versions:
-        version = raw if isinstance(raw, Version) else normalize_python_version(str(raw))
+        version = _as_version(raw)
         if version is None:
             continue
         old_ok = allows_python(old_requires, version)
