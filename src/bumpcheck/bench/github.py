@@ -26,6 +26,7 @@ from typing import Any
 
 API_ROOT = "https://api.github.com"
 RAW_ROOT = "https://raw.githubusercontent.com"
+AUTH_HOSTS = frozenset({"api.github.com", "codeload.github.com"})
 USER_AGENT = "bumpcheck-bench/0.1"
 DEFAULT_CACHE_DIR = Path(".bumpcheck-cache") / "github"
 SEARCH_MIN_INTERVAL = 3.0
@@ -35,6 +36,8 @@ MAX_RATE_LIMIT_RETRIES = 4
 MAX_NET_RETRIES = 4
 NOTICE_MIN_SLEEP = 5.0
 REQUEST_TIMEOUT = 30
+MAX_DOWNLOAD_BYTES = 200 * 1024 * 1024
+STREAM_CHUNK_SIZE = 64 * 1024
 
 RETRYABLE_NETWORK_ERRORS = (
     http.client.IncompleteRead,
@@ -52,6 +55,10 @@ RATE_LIMIT_HEADERS = (
 )
 
 Transport = Callable[[str, str, Mapping[str, str]], tuple[int, Mapping[str, str], bytes]]
+StreamTransport = Callable[[str, Mapping[str, str], int], tuple[int, Mapping[str, str], bytes]]
+ExternalTransport = Callable[
+    [str, Mapping[str, str], float, int], tuple[int, Mapping[str, str], bytes]
+]
 
 
 class GitHubError(Exception):
@@ -102,6 +109,10 @@ class OfflineCacheMiss(GitHubError):
     """Offline mode was requested but a URL is not in the cache."""
 
 
+class DownloadTooLarge(GitHubError):
+    """A compressed download exceeded the configured cap while streaming."""
+
+
 def _stderr_warning(message: str) -> None:
     print(message, file=sys.stderr)
 
@@ -126,6 +137,75 @@ def urllib_transport(
     try:
         with _OPENER.open(request, timeout=REQUEST_TIMEOUT) as response:
             return response.status, dict(response.headers.items()), response.read()
+    except urllib.error.HTTPError as exc:
+        body = exc.read() if exc.fp is not None else b""
+        return exc.code, dict(exc.headers.items()) if exc.headers else {}, body
+
+
+def _is_auth_host(url: str) -> bool:
+    parts = urllib.parse.urlsplit(url)
+    return parts.scheme == "https" and parts.hostname in AUTH_HOSTS
+
+
+def _declared_too_large(headers: Mapping[str, str], limit: int) -> bool:
+    value = _header(headers, "content-length")
+    if value is None:
+        return False
+    try:
+        return int(value) > limit
+    except ValueError:
+        return False
+
+
+def _read_capped(response: object, limit: int) -> bytes:
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        try:
+            chunk = response.read(STREAM_CHUNK_SIZE)
+        except TypeError:
+            chunk = response.read()
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > limit:
+            raise DownloadTooLarge(f"Download exceeded {limit} bytes")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def urllib_stream_transport(
+    url: str, headers: Mapping[str, str], max_bytes: int
+) -> tuple[int, Mapping[str, str], bytes]:
+    request = urllib.request.Request(url, headers=dict(headers), method="GET")
+    try:
+        with _OPENER.open(request, timeout=REQUEST_TIMEOUT) as response:
+            response_headers = (
+                dict(response.headers.items()) if hasattr(response, "headers") else {}
+            )
+            if _declared_too_large(response_headers, max_bytes):
+                raise DownloadTooLarge(f"Declared download size exceeds {max_bytes} bytes")
+            body = _read_capped(response, max_bytes)
+            return response.status, response_headers, body
+    except urllib.error.HTTPError as exc:
+        body = exc.read() if exc.fp is not None else b""
+        return exc.code, dict(exc.headers.items()) if exc.headers else {}, body
+
+
+def urllib_external_transport(
+    url: str, headers: Mapping[str, str], timeout: float, max_bytes: int
+) -> tuple[int, Mapping[str, str], bytes]:
+    request = urllib.request.Request(url, headers=dict(headers), method="GET")
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            response_headers = (
+                dict(response.headers.items()) if hasattr(response, "headers") else {}
+            )
+            if _declared_too_large(response_headers, max_bytes):
+                raise DownloadTooLarge(f"Declared download size exceeds {max_bytes} bytes")
+            body = _read_capped(response, max_bytes)
+            status = getattr(response, "status", 200)
+            return status, response_headers, body
     except urllib.error.HTTPError as exc:
         body = exc.read() if exc.fp is not None else b""
         return exc.code, dict(exc.headers.items()) if exc.headers else {}, body
@@ -161,6 +241,8 @@ class GitHubClient:
         *,
         token: str | None = None,
         transport: Transport | None = None,
+        stream_transport: StreamTransport | None = None,
+        external_transport: ExternalTransport | None = None,
         sleep: Callable[[float], None] = time.sleep,
         now: Callable[[], float] = time.time,
         rng: Callable[[], float] = random.random,
@@ -171,6 +253,8 @@ class GitHubClient:
     ) -> None:
         self.token = token if token is not None else os.environ.get("GITHUB_TOKEN")
         self._transport = transport or urllib_transport
+        self._stream_transport = stream_transport or urllib_stream_transport
+        self._external_transport = external_transport or urllib_external_transport
         self._sleep = sleep
         self._now = now
         self._rng = rng
@@ -184,13 +268,13 @@ class GitHubClient:
         self._last_request_at: float | None = None
         self._pending_reset_at: float | None = None
 
-    def _base_headers(self, *, authenticate: bool = True) -> dict[str, str]:
+    def _base_headers(self, url: str, *, authenticate: bool = True) -> dict[str, str]:
         headers = {
             "User-Agent": USER_AGENT,
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
         }
-        if authenticate and self.token:
+        if authenticate and self.token and _is_auth_host(url):
             headers["Authorization"] = f"Bearer {self.token}"
         return headers
 
@@ -214,7 +298,7 @@ class GitHubClient:
             self.cache_hits += 1
             return entry["body"]
 
-        headers = self._base_headers()
+        headers = self._base_headers(url)
         if entry is not None and entry.get("etag"):
             headers["If-None-Match"] = entry["etag"]
         status, response_headers, body = self._send(url, headers)
@@ -261,6 +345,105 @@ class GitHubClient:
             path = urllib.parse.urlsplit(url).path
             raise GitHubError(f"Invalid JSON response for {path}") from exc
 
+    def get_external_bytes_limited(
+        self, url: str, *, timeout: float = 10, max_bytes: int = MAX_DOWNLOAD_BYTES
+    ) -> bytes:
+        entry = self._load_cache(url)
+        if entry is not None:
+            self.cache_hits += 1
+            return entry["body"]
+        if self.offline:
+            raise OfflineCacheMiss(
+                f"--offline was given but nothing for {url} is cached in {self.cache_dir}"
+            )
+        headers = {"User-Agent": USER_AGENT}
+        status, response_headers, body = self._external_transport(url, headers, timeout, max_bytes)
+        if status >= 400:
+            raise HttpStatusError(status, url, body, response_headers)
+        self._store_cache(url, None, body)
+        return body
+
+    def _send_stream(
+        self, url: str, headers: Mapping[str, str], max_bytes: int
+    ) -> tuple[int, Mapping[str, str], bytes]:
+        self._wait_for_pending_reset()
+        attempt = 0
+        rate_limit_attempt = 0
+        net_attempt = 0
+        while True:
+            self._throttle(url)
+            try:
+                status, response_headers, body = self._stream_transport(
+                    url, dict(headers), max_bytes
+                )
+            except DownloadTooLarge:
+                raise
+            except RETRYABLE_NETWORK_ERRORS as exc:
+                if net_attempt >= MAX_NET_RETRIES:
+                    path = urllib.parse.urlsplit(url).path
+                    raise GitHubError(
+                        f"Network error after {MAX_NET_RETRIES + 1} attempts for {path}: "
+                        f"{type(exc).__name__}: {exc}"
+                    ) from exc
+                self._sleep((2.0**net_attempt) + self._rng() * 0.5)
+                net_attempt += 1
+                continue
+            self.api_calls += 1
+            if status in {403, 429}:
+                rate = self._rate_limit_sleep(response_headers, body, rate_limit_attempt)
+                if rate is not None and rate_limit_attempt < MAX_RATE_LIMIT_RETRIES:
+                    delay, reason = rate
+                    rate_limit_attempt += 1
+                    wake = self._rate_limit_wake(response_headers, delay)
+                    if delay > self.max_rate_limit_wait_s:
+                        raise RateLimitWaitTooLong(self._wait_too_long_message(delay, wake))
+                    if delay >= NOTICE_MIN_SLEEP:
+                        path = urllib.parse.urlsplit(url).path
+                        self._warn(
+                            f"rate limited ({reason}); sleeping {delay:g}s until {wake}, "
+                            f"retry {rate_limit_attempt}/{MAX_RATE_LIMIT_RETRIES} for {path}"
+                        )
+                    self._sleep(delay)
+                    continue
+                return status, response_headers, body
+            if 500 <= status < 600 and attempt + 1 < MAX_ATTEMPTS:
+                self._sleep((2.0**attempt) + self._rng() * 0.5)
+                attempt += 1
+                continue
+            return status, response_headers, body
+
+    def download_bytes(self, url: str, *, max_bytes: int = MAX_DOWNLOAD_BYTES) -> bytes:
+        entry = self._load_cache(url)
+        if self.offline:
+            if entry is None:
+                raise OfflineCacheMiss(
+                    f"--offline was given but nothing for {url} is cached in {self.cache_dir}"
+                )
+            self.cache_hits += 1
+            return entry["body"]
+        if entry is not None:
+            self.cache_hits += 1
+            return entry["body"]
+        current = url
+        for hop in range(6):
+            if not _is_auth_host(current):
+                hostname = urllib.parse.urlsplit(current).hostname
+                raise GitHubError(f"download host is not allowed: {hostname}")
+            headers = self._base_headers(current, authenticate=hop == 0)
+            status, response_headers, body = self._send_stream(current, headers, max_bytes)
+            if 300 <= status < 400:
+                location = _header(response_headers, "location")
+                if not location:
+                    raise GitHubError(f"Redirect without Location for {current}")
+                current = urllib.parse.urljoin(current, location)
+                continue
+            if status >= 400:
+                raise HttpStatusError(status, current, body, response_headers)
+            self._store_cache(url, None, body)
+            self._pause_if_exhausted(response_headers)
+            return body
+        raise GitHubError(f"Too many redirects for {url}")
+
     def get_log(self, url: str) -> str:
         """Fetch a job log, following its redirect without the token.
 
@@ -281,12 +464,13 @@ class GitHubClient:
         if entry is not None:
             return entry["body"].decode("utf-8", "replace")
 
-        status, headers, body = self._send(url, self._base_headers())
+        status, headers, body = self._send(url, self._base_headers(url))
         if 300 <= status < 400:
             location = _header(headers, "location")
             if not location:
                 raise GitHubError(f"Redirect without Location for {url}")
-            status, headers, body = self._send(location, self._base_headers(authenticate=False))
+            redirect_headers = self._base_headers(location, authenticate=False)
+            status, headers, body = self._send(location, redirect_headers)
         if status >= 400:
             raise HttpStatusError(status, url, body, headers)
         self._store_cache(url, None, body)

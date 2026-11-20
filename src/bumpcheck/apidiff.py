@@ -4,12 +4,8 @@ from __future__ import annotations
 
 import ast
 import hashlib
-import io
 import json
 import os
-import shutil
-import stat
-import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -21,6 +17,8 @@ from typing import Literal
 import griffe
 from packaging.utils import canonicalize_name
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from bumpcheck import archive
 
 Severity = Literal["high", "medium", "low"]
 Status = Literal["ok", "no_api_diff"]
@@ -44,9 +42,7 @@ _USER_AGENT = "bumpcheck"
 _TIMEOUT_SECONDS = 30
 _RETRIES = 3
 _RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
-_MAX_TOTAL_BYTES = 200 * 1024 * 1024
-_MAX_MEMBERS = 20000
-_CHUNK_SIZE = 64 * 1024
+_MAX_TOTAL_BYTES = archive.MAX_EXTRACTED_BYTES
 _WHEEL_MARKER = ".bumpcheck-wheel"
 
 _SEVERITY: dict[str, Severity] = {
@@ -210,61 +206,27 @@ def _choose_wheel(urls: list, name: str, version: str) -> dict:
     return wheels[0]
 
 
-def _is_unsafe(name: str) -> bool:
-    if not name or name.startswith(("/", "\\")) or "\\" in name:
-        return True
-    parts = Path(name).parts
-    return any(part == ".." or ":" in part for part in parts)
-
-
-def _is_symlink(member: zipfile.ZipInfo) -> bool:
-    return stat.S_ISLNK(member.external_attr >> 16)
-
-
 def _extract_member(
-    archive: zipfile.ZipFile,
+    zip_archive: zipfile.ZipFile,
     member: zipfile.ZipInfo,
     destination: Path,
     limit: int,
 ) -> int:
-    if member.is_dir():
-        destination.mkdir(parents=True, exist_ok=True)
-        return 0
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    written = 0
-    with archive.open(member) as source, destination.open("wb") as target:
-        while True:
-            chunk = source.read(_CHUNK_SIZE)
-            if not chunk:
-                break
-            written += len(chunk)
-            if written > limit:
-                raise _ApiDiffError("too_large", f"Archive exceeds {_MAX_TOTAL_BYTES} bytes")
-            target.write(chunk)
-    return written
+    return archive.extract_zip_member(zip_archive, member, destination, limit)
 
 
 def _unpack(wheel_bytes: bytes, target: Path, parent: Path, wheel_filename: str) -> None:
-    temp_dir = Path(tempfile.mkdtemp(dir=parent, prefix=f"{target.name}-"))
     try:
-        with zipfile.ZipFile(io.BytesIO(wheel_bytes)) as archive:
-            members = archive.infolist()
-            if len(members) > _MAX_MEMBERS:
-                raise _ApiDiffError("too_large", f"Archive has more than {_MAX_MEMBERS} members")
-            total = 0
-            for member in members:
-                if _is_unsafe(member.filename) or _is_symlink(member):
-                    raise _ApiDiffError("unsafe_archive", f"Unsafe member: {member.filename}")
-                destination = temp_dir / member.filename
-                total += _extract_member(archive, member, destination, _MAX_TOTAL_BYTES - total)
-        (temp_dir / _WHEEL_MARKER).write_text(wheel_filename, encoding="utf-8")
-        temp_dir.rename(target)
-    except _ApiDiffError:
-        shutil.rmtree(temp_dir, ignore_errors=True)
-        raise
-    except (OSError, zipfile.BadZipFile) as exc:
-        shutil.rmtree(temp_dir, ignore_errors=True)
-        raise _ApiDiffError("unpack_failed", f"{type(exc).__name__}: {exc}") from exc
+        archive.extract_zip(
+            wheel_bytes,
+            target,
+            selector=archive.select_wheel_member,
+            cap_bytes=_MAX_TOTAL_BYTES,
+            marker=(_WHEEL_MARKER, wheel_filename),
+            member_writer=_extract_member,
+        )
+    except archive.ArchiveError as exc:
+        raise _ApiDiffError(exc.kind, str(exc)) from exc
 
 
 def get_unpacked(
@@ -333,17 +295,34 @@ def _names_from_record(record: Path, dist_info_name: str) -> list[str]:
     return names
 
 
+def _top_level_from_sources(unpacked_dir: Path) -> list[str]:
+    names: set[str] = set()
+    for path in unpacked_dir.rglob("*"):
+        if not path.is_file() or path.suffix not in {".py", ".pyi"}:
+            continue
+        relative = path.relative_to(unpacked_dir).parts
+        if any(part.endswith(".dist-info") or part.endswith(".data") for part in relative):
+            continue
+        if len(relative) == 1:
+            names.add(relative[0].split(".", 1)[0])
+        else:
+            names.add(relative[0])
+    return sorted(names)
+
+
 def top_level_modules(unpacked_dir: Path) -> list[str]:
     """Return the top-level import names shipped in an unpacked wheel."""
     dist_info = _find_dist_info(unpacked_dir)
-    if dist_info is None:
-        return []
-    top_level = dist_info / "top_level.txt"
-    if top_level.is_file():
-        names = [line.strip() for line in top_level.read_text(encoding="utf-8").splitlines()]
-    else:
-        record = dist_info / "RECORD"
-        names = _names_from_record(record, dist_info.name) if record.is_file() else []
+    names: list[str] = []
+    if dist_info is not None:
+        top_level = dist_info / "top_level.txt"
+        if top_level.is_file():
+            names = [line.strip() for line in top_level.read_text(encoding="utf-8").splitlines()]
+        else:
+            record = dist_info / "RECORD"
+            names = _names_from_record(record, dist_info.name) if record.is_file() else []
+    if not names:
+        names = _top_level_from_sources(unpacked_dir)
     return sorted({name for name in names if name})
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from datetime import date
 from enum import Enum
 from pathlib import Path
@@ -11,7 +12,9 @@ from packaging.version import InvalidVersion, Version
 
 from bumpcheck import __version__
 from bumpcheck.apidiff import ApiDiffResult, diff_versions
-from bumpcheck.bench.github import GitHubError, RateLimitWaitTooLong
+from bumpcheck.bench.eval import evaluate as run_eval
+from bumpcheck.bench.eval import load_results
+from bumpcheck.bench.github import GitHubClient, GitHubError, RateLimitWaitTooLong
 from bumpcheck.bench.inspect_case import inspect_case as run_inspect
 from bumpcheck.bench.inspect_case import redact
 from bumpcheck.bench.labels import (
@@ -22,6 +25,8 @@ from bumpcheck.bench.labels import (
     run_label_loop,
 )
 from bumpcheck.bench.mine import mine as run_mine
+from bumpcheck.bench.report import write_report
+from bumpcheck.bench.snapshot import directory_size, snapshot_case
 from bumpcheck.check import check as run_check
 from bumpcheck.check import format_text
 from bumpcheck.envfile import EnvFileError, has_token, load_env
@@ -68,6 +73,12 @@ class OnlySuggestionChoice(str, Enum):
 class Round1LabelChoice(str, Enum):
     BROKE = "BROKE"
     OK = "OK"
+
+
+class SplitChoice(str, Enum):
+    DEV = "dev"
+    TEST = "test"
+    ALL = "all"
 
 
 def _version_callback(value: bool) -> None:
@@ -618,3 +629,149 @@ def bench_inspect(
         typer.echo(redact(str(exc)), err=True)
         raise typer.Exit(code=2) from exc
     typer.echo(report, nl=False)
+
+
+@bench_app.command("snapshot")
+def bench_snapshot(
+    dir: Path = typer.Option(
+        ...,
+        "--dir",
+        help="Directory containing candidates.jsonl; snapshots are written under it.",
+    ),
+    case: list[str] | None = typer.Option(
+        None,
+        "--case",
+        help="Only snapshot this case id; repeatable.",
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Rewrite terminal snapshots instead of skipping them.",
+    ),
+    offline: bool = typer.Option(
+        False,
+        "--offline",
+        help="Read cached HTTP responses only; never touch the network.",
+    ),
+    cache_dir: Path | None = typer.Option(
+        None,
+        "--cache-dir",
+        help="HTTP response cache directory.",
+    ),
+    allow_unauthenticated: bool = typer.Option(
+        False,
+        "--allow-unauthenticated",
+        help="Continue without GITHUB_TOKEN instead of exiting.",
+    ),
+    max_rate_limit_wait: float = typer.Option(
+        900.0,
+        "--max-rate-limit-wait",
+        help="Longest GitHub rate-limit wait in seconds; 0 fails immediately.",
+    ),
+) -> None:
+    """Fetch offline wheel and repo snapshots for benchmark cases."""
+    max_wait = _validate_max_rate_limit_wait(max_rate_limit_wait)
+    _guard_github_token(offline=offline, allow_unauthenticated=allow_unauthenticated)
+    try:
+        candidates = load_candidates(dir / "candidates.jsonl")
+        wanted = set(case or ())
+        client = GitHubClient(
+            offline=offline,
+            cache_dir=cache_dir,
+            max_rate_limit_wait_s=max_wait,
+        )
+        for case_id in sorted(candidates):
+            if wanted and case_id not in wanted:
+                continue
+            record = snapshot_case(
+                candidates[case_id],
+                dir / "snapshots",
+                github_client=client,
+                force=force,
+            )
+            typer.echo(f"{case_id}: {record.get('status')}")
+    except (GitHubError, ValueError, OSError) as exc:
+        typer.echo(redact(str(exc)), err=True)
+        raise typer.Exit(code=2) from exc
+    root = dir / "snapshots"
+    typer.echo(f"snapshot disk usage: {directory_size(root)} bytes")
+
+
+@bench_app.command("eval")
+def bench_eval(
+    dir: Path = typer.Option(
+        ...,
+        "--dir",
+        help="Directory containing candidates.jsonl, labels.jsonl and snapshots.",
+    ),
+    split: SplitChoice = typer.Option(
+        SplitChoice.DEV,
+        "--split",
+        help="Which candidate split to evaluate.",
+    ),
+    timeout: float = typer.Option(
+        120.0,
+        "--timeout",
+        help="Hard per-case worker timeout in seconds.",
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Re-evaluate cases even with a matching fingerprint.",
+    ),
+    case: list[str] | None = typer.Option(
+        None,
+        "--case",
+        help="Only evaluate this case id; repeatable.",
+    ),
+    jobs: int = typer.Option(
+        1,
+        "--jobs",
+        help="Number of concurrent worker processes.",
+    ),
+) -> None:
+    """Evaluate labeled benchmark cases against snapshots."""
+    if timeout <= 0:
+        typer.echo("--timeout must be greater than zero", err=True)
+        raise typer.Exit(code=2)
+    if jobs < 1:
+        typer.echo("--jobs must be one or greater", err=True)
+        raise typer.Exit(code=2)
+    try:
+        records = run_eval(
+            dir,
+            split=split.value,
+            timeout=timeout,
+            force=force,
+            case_ids=set(case or ()),
+            jobs=jobs,
+        )
+    except (ValueError, OSError) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+    counts = Counter(str(record.get("label")) for record in records)
+    summary = " ".join(f"{key}={value}" for key, value in sorted(counts.items()))
+    typer.echo(f"results: {len(records)} {summary}")
+
+
+@bench_app.command("report")
+def bench_report(
+    dir: Path = typer.Option(
+        ...,
+        "--dir",
+        help="Directory containing eval/results.jsonl.",
+    ),
+    split: SplitChoice = typer.Option(
+        SplitChoice.DEV,
+        "--split",
+        help="Which split to report.",
+    ),
+) -> None:
+    """Write and print a Markdown benchmark report."""
+    try:
+        records = load_results(dir / "eval" / "results.jsonl")
+        text = write_report(dir, records, split=split.value)
+    except (ValueError, OSError) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+    typer.echo(text, nl=False)

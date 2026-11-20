@@ -11,6 +11,7 @@ import pytest
 
 from bumpcheck.bench.github import (
     USER_AGENT,
+    DownloadTooLarge,
     GitHubAuthError,
     GitHubClient,
     GitHubError,
@@ -466,6 +467,74 @@ def test_external_requests_carry_no_authorization_including_redirect(
     first_headers = captured[0][1]
     user_agents = [value for name, value in first_headers.items() if name.lower() == "user-agent"]
     assert user_agents == [USER_AGENT]
+
+
+def test_authorization_is_limited_to_api_and_codeload_hosts(tmp_path: Path) -> None:
+    api = "https://api.github.com/repos/o/r"
+    raw = "https://raw.githubusercontent.com/o/r/main/README.md"
+    codeload = "https://codeload.github.com/o/r/tar.gz/main"
+    recorder = Recorder({api: _json({}), raw: _json({}), codeload: _json({})})
+    client = _client(recorder, tmp_path, token="super-secret-token")
+
+    client.get_json(api)
+    client.get_bytes(raw)
+    client.get_bytes(codeload)
+
+    assert recorder.calls[0]["headers"]["Authorization"] == "Bearer super-secret-token"
+    assert "Authorization" not in recorder.calls[1]["headers"]
+    assert recorder.calls[2]["headers"]["Authorization"] == "Bearer super-secret-token"
+
+
+def test_download_strips_authorization_on_every_redirect(tmp_path: Path) -> None:
+    api = "https://api.github.com/repos/o/r/tarball/abc"
+    codeload = "https://codeload.github.com/o/r/tar.gz/abc"
+    calls: list[tuple[str, dict]] = []
+
+    def stream(url: str, headers: dict, max_bytes: int) -> tuple[int, dict, bytes]:
+        calls.append((url, dict(headers)))
+        if url == api:
+            return 302, {"Location": codeload}, b""
+        return 200, {}, b"tar-bytes"
+
+    client = GitHubClient(
+        token="super-secret-token",
+        stream_transport=stream,
+        cache_dir=tmp_path / "cache",
+    )
+
+    assert client.download_bytes(api) == b"tar-bytes"
+    assert [url for url, _ in calls] == [api, codeload]
+    assert calls[0][1]["Authorization"] == "Bearer super-secret-token"
+    assert "Authorization" not in calls[1][1]
+
+
+def test_external_download_cap_aborts_while_streaming(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reads = 0
+
+    class Chunked:
+        headers: dict = {}
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc: object) -> bool:
+            return False
+
+        def read(self, size: int | None = None) -> bytes:
+            nonlocal reads
+            reads += 1
+            return b"x" * 8
+
+    monkeypatch.setattr(urllib.request, "urlopen", lambda request, timeout=None: Chunked())
+    client = GitHubClient(cache_dir=tmp_path / "cache")
+
+    with pytest.raises(DownloadTooLarge):
+        client.get_external_bytes_limited("https://pypi.org/pypi/pkg/1.0.0/json", max_bytes=10)
+
+    assert reads == 2
 
 
 def test_wait_over_limit_raises_before_sleeping(tmp_path: Path) -> None:
