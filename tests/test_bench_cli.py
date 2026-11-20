@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from bumpcheck.bench.snapshot import case_slug
@@ -28,10 +29,20 @@ def _candidate() -> dict[str, object]:
     }
 
 
-def _base(tmp_path: Path) -> Path:
+def _label(case_id: str, label: str) -> dict[str, object]:
+    return {
+        "case_id": case_id,
+        "round": 1,
+        "label": label,
+        "labeled_on": "2026-01-01",
+    }
+
+
+def _base(tmp_path: Path, *, labels: list[dict[str, object]] | None = None) -> Path:
     candidate = _candidate()
     (tmp_path / "candidates.jsonl").write_text(json.dumps(candidate) + "\n", encoding="utf-8")
-    (tmp_path / "labels.jsonl").write_text("", encoding="utf-8")
+    payload = "".join(json.dumps(label) + "\n" for label in labels or ())
+    (tmp_path / "labels.jsonl").write_text(payload, encoding="utf-8")
     case_dir = tmp_path / "snapshots" / case_slug(candidate)
     case_dir.mkdir(parents=True)
     (case_dir / "manifest.json").write_text(
@@ -58,7 +69,7 @@ def test_bench_snapshot_prints_disk_usage(tmp_path: Path) -> None:
 
 
 def test_bench_report_writes_dev_report_by_default(tmp_path: Path) -> None:
-    directory = _base(tmp_path)
+    directory = _base(tmp_path, labels=[_label("owner/repo#1", "OK")])
     eval_dir = directory / "eval"
     eval_dir.mkdir()
     record = {
@@ -79,3 +90,35 @@ def test_bench_report_writes_dev_report_by_default(tmp_path: Path) -> None:
     assert result.exit_code == 0, result.output
     assert "# Benchmark report (split: dev)" in result.output
     assert (eval_dir / "report.md").is_file()
+
+
+@pytest.mark.parametrize("write_empty", [False, True])
+def test_bench_eval_with_no_labels_prints_message(tmp_path: Path, write_empty: bool) -> None:
+    directory = tmp_path / "bench"
+    directory.mkdir()
+    labels_path = directory / "labels.jsonl"
+    if write_empty:
+        labels_path.write_text("\n", encoding="utf-8")
+
+    result = runner.invoke(app, ["bench", "eval", "--dir", str(directory), "--split", "all"])
+
+    expected = f"0 labeled cases found in {labels_path} (or file missing)"
+    assert result.exit_code == 0, result.output
+    assert result.output.replace("\r\n", "\n").strip() == expected
+    assert not (directory / "eval").exists()
+
+
+@pytest.mark.parametrize("write_empty", [False, True])
+def test_bench_report_with_no_labels_prints_message(tmp_path: Path, write_empty: bool) -> None:
+    directory = tmp_path / "bench"
+    directory.mkdir()
+    labels_path = directory / "labels.jsonl"
+    if write_empty:
+        labels_path.write_text("\n", encoding="utf-8")
+
+    result = runner.invoke(app, ["bench", "report", "--dir", str(directory), "--split", "all"])
+
+    expected = f"0 labeled cases found in {labels_path} (or file missing)"
+    assert result.exit_code == 0, result.output
+    assert result.output.replace("\r\n", "\n").strip() == expected
+    assert not (directory / "eval" / "report.md").exists()

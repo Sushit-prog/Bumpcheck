@@ -87,6 +87,12 @@ def _version_callback(value: bool) -> None:
         raise typer.Exit()
 
 
+def _no_labels_message(labels_path: Path) -> str | None:
+    if load_labels(labels_path):
+        return None
+    return f"0 labeled cases found in {labels_path} (or file missing)"
+
+
 app = typer.Typer(
     add_completion=False,
     help="Analyze whether a dependency bump will break your code.",
@@ -738,6 +744,10 @@ def bench_eval(
         typer.echo("--jobs must be one or greater", err=True)
         raise typer.Exit(code=2)
     try:
+        message = _no_labels_message(dir / "labels.jsonl")
+        if message is not None:
+            typer.echo(message)
+            return
         records = run_eval(
             dir,
             split=split.value,
@@ -769,6 +779,10 @@ def bench_report(
 ) -> None:
     """Write and print a Markdown benchmark report."""
     try:
+        message = _no_labels_message(dir / "labels.jsonl")
+        if message is not None:
+            typer.echo(message)
+            return
         records = load_results(dir / "eval" / "results.jsonl")
         text = write_report(dir, records, split=split.value)
     except (ValueError, OSError) as exc:
