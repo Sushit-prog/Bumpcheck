@@ -13,13 +13,24 @@ def always_safe(bump: Bump) -> Verdict:
     return "SAFE"
 
 
-def semver_rule(bump: Bump) -> Verdict:
-    """Review major bumps, plus minor bumps while the major version is zero."""
-    if bump.old_version is None or bump.new_version is None:
+def semver_rule(
+    bump_or_old: Bump | str | None,
+    new_version: str | None = None,
+) -> Verdict:
+    """Review major bumps, plus minor bumps while the major version is zero.
+
+    Accepts either a Bump or an explicit (old_version, new_version) pair.
+    """
+    if isinstance(bump_or_old, Bump):
+        old_version = bump_or_old.old_version
+        new_version = bump_or_old.new_version
+    else:
+        old_version = bump_or_old
+    if old_version is None or new_version is None:
         return "SAFE"
     try:
-        old = Version(bump.old_version)
-        new = Version(bump.new_version)
+        old = Version(old_version)
+        new = Version(new_version)
     except InvalidVersion:
         return "SAFE"
     if new.major > old.major:

@@ -89,7 +89,7 @@ larger than 2 MB and symlinks are skipped, and excluded directories include
 Classify every bump between two lockfiles against a repository:
 
 ```
-uv run bumpcheck check REPO_PATH OLD NEW --kind uv.lock [--format json|text]
+uv run bumpcheck check REPO_PATH OLD NEW --kind uv.lock [--format json|text|markdown]
 uv run bumpcheck check REPO_PATH OLD NEW --kind uv.lock --fail-on REVIEW
 ```
 
@@ -152,10 +152,13 @@ with:
 
 Inputs are `github-token`, `lockfile` (default `uv.lock`), `lock-kind`
 (auto-detected when empty), `fail-on` (default `REVIEW`), `comment` (default
-`true`), and `artifact-name`. The action checks out the base ref for tooling and
-the PR head into a temporary path for static analysis, so the PR's code is never
-executed. A workflow using the action needs `contents: read` and
-`pull-requests: write`.
+`true`), and `artifact-name`. Outputs are `overall`, `report-path`, and
+`exit-code`. The example above points at `Sushit-prog/Bumpcheck@main`, which
+matches this repository's `origin` and current `main` branch; this repository's
+own workflow uses `uses: ./` to test the local action. The action checks out the
+base ref for tooling and the PR head into a temporary path for static analysis,
+so the PR's code is never executed. A workflow using the action needs
+`contents: read` and `pull-requests: write`.
 
 ## Benchmark
 
@@ -188,24 +191,34 @@ head commit. It writes three files to `--out`:
   (`search_calls`), and the `retried`/`recovered` counters from
   `--retry-excluded`.
 
-Single-package bumps carry `autoclosed: true` when the pull request title was
-decorated with `- autoclosed`. Renovate titles are stripped of trailing
-`- autoclosed`, `[SECURITY]`-style tags and `(major)`-style parenthesised
-decorations (repeatedly, never down to an empty title) before parsing.
-Parenthesised text inside the title, such as the `(fork)` in
-`Update dependency foo (fork) to v1`, is left alone. Dependabot's
+Renovate single-package bumps carry `autoclosed: true` when the title was
+decorated with `- autoclosed`; Dependabot titles do not set this flag. Renovate
+titles are stripped of trailing `- autoclosed`, `[SECURITY]`-style tags and
+`(major)`-style parenthesised decorations (repeatedly, never down to an empty
+title) before parsing. Parenthesised text inside the title is not stripped by
+that step, but text such as the `(fork)` in `Update dependency foo (fork) to v1`
+prevents the Renovate title from parsing, so the PR is excluded as
+`not_single_package`. Dependabot's
 `Bump X from A to B in the <group> group across N directories` form is treated
 as a single-package bump, not a group bump.
 
 Discovery walks fixed `--window-days` windows (default 7) from `--since` to
 `--until`, ordered deterministically by the SHA-256 of each window's start
 date so neighbouring requests are not adjacent dates. Windows are visited
-lazily and sequentially: each window is searched for each selected bot
-(Dependabot first), only the first `--pages-per-window` pages are read
-(default 1, max 10), and items are yielded sorted by `(created_at, number)`
-before moving on. A window whose `total_count` reaches GitHub's 1000-result
-cap is not split. The next window is only fetched when another item is
-needed, and reaching `--limit` stops all further search requests.
+lazily and sequentially: for each window, each selected bot is searched
+(Dependabot first) for at most `--pages-per-window` pages (default 1, max 10),
+and items from each page are yielded sorted by `(created_at, number)` before
+the next bot or window is fetched. `--ci-status {any,failure,success}` (default
+`any`) adds GitHub's `status:` qualifier to the search and is copied into each
+candidate's `sampled_by`. `--limit` (default 60) counts candidates already
+stored in `candidates.jsonl` from earlier runs; discovery stops when that kept
+count is reached, while `--retry-excluded` recoveries may push it above the
+limit. `--max-per-repo` (default 3) caps kept candidates per repository,
+including earlier runs, and records over-cap hits as `repo_cap` before any PR
+request. There is no window splitting: pages are read only up to
+`--pages-per-window`, and GitHub's 1000-result search cap is not compensated
+for. The next window is fetched only when another item is needed, and reaching
+`--limit` stops all further search requests.
 
 Titles classified as single-package bumps whose package name contains `/` or
 starts with `@` (GitHub Actions/Docker references and npm scopes) are excluded
@@ -246,7 +259,8 @@ apply, and progress lines are prefixed `[retry]`. Entries not selected by
 
 CI outcomes are noisy suggestions, not labels. `OK_SUSPECT` means every
 signal-bearing check passed on a merged PR, `BROKE_SUSPECT` means at least one
-non-lint check failed, and `UNCLEAR` covers everything else (for example a
+non-lint check failed with a `regression` or `no_base_run` comparison, and
+`UNCLEAR` covers everything else (for example a
 passing PR that was closed without merging). For failing checks the same check
 is compared against the base commit (`base_ci_checks`, `failure_vs_base`):
 a `regression` (passed at base) or a check with `no_base_run` keeps
@@ -257,8 +271,9 @@ candidate still needs hand verification.
 
 With `--logs`, each failing check yields a `failure_excerpts` entry whose
 `log_status` is `matched` (package-specific exception lines were found),
-`fetched_no_match`, or `unavailable` (no job id, missing token, or the log
-could not be fetched). For `BROKE_SUSPECT` merged PRs, `later_fix_commits`
+`fetched_no_match`, or `unavailable` (no job id or the log could not be
+fetched; `--logs` itself requires `GITHUB_TOKEN`). For `BROKE_SUSPECT` merged
+PRs, `later_fix_commits`
 lists commits after the merge that touch the lockfile or mention the package;
 the PR's own merge commit, messages that merge this PR (`#<number>`), and
 commits dated at or before the merge/close time are filtered out.
@@ -283,13 +298,12 @@ after every case, so pressing Ctrl-C saves what has been mined, writes
 
 The `dev`/`test` split is assigned deterministically per repository
 (`sha256(repo)` first byte below 77 means `test`, about 30%), so reruns and
-resumed runs keep the same split and no PR leaks between splits. Discovery
-builds one-month windows per bot (oldest first) and takes one PR from each
-window in round-robin order, so results spread across the whole date range
-instead of exhausting the oldest month first; each search page is still
-fetched lazily, so `--limit` stops early. A window is split in half whenever
-GitHub's 1000-result search cap is hit, and a single day with more than 1000
-matches is still truncated by GitHub and cannot be paged further.
+resumed runs keep the same split and no PR leaks between splits. Discovery uses
+the same fixed `--window-days` windows and SHA-256 ordering described above for
+every selected bot: all items from one window are yielded, sorted by
+`created_at` and PR number, before later windows are visited. Windows are never
+split in half; `--pages-per-window` is the only page bound, and a day with more
+than 1000 matching PRs is still truncated by GitHub's own search results.
 
 ### Labeling rules
 
@@ -341,7 +355,23 @@ against the new release's `requires_python`, and inferred workflow/job locations
 for failing checks. `--also-dir DIR` (repeatable) falls back to other candidate
 stores when the case is missing from `--dir`. `--offline` replays the response
 cache only; `--cache-dir` selects the cache directory (default
-`.bumpcheck-cache/github`).
+`.bumpcheck-cache/github`). Batch inspection is available as
+`bumpcheck bench inspect-batch --dir DIR --out PATH`.
+
+### Snapshot, eval and report
+
+Fetch offline snapshots, evaluate labeled cases against them, then write the
+Markdown report:
+
+```
+uv run bumpcheck bench snapshot --dir bench/v0-candidates
+uv run bumpcheck bench eval --dir bench/v0-candidates [--split dev|test|all]
+uv run bumpcheck bench report --dir bench/v0-candidates [--split dev|test|all]
+```
+
+`--split` defaults to `dev` for both `eval` and `report`; `all` includes both
+splits. The test split is evaluated once at the end; pass `--split test` only
+for that.
 
 ## Credentials
 

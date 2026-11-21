@@ -8,6 +8,9 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+from packaging.version import InvalidVersion, Version
+
+from bumpcheck.baselines import semver_rule
 from bumpcheck.bench.eval import _label_records
 from bumpcheck.bench.labels import load_candidates, load_labels
 from bumpcheck.verdict import Verdict
@@ -42,6 +45,54 @@ def _verdict(record: dict[str, Any], system: str) -> Verdict:
     return value if value in {"SAFE", "REVIEW", "LIKELY_BREAKING", "UNKNOWN"} else "UNKNOWN"
 
 
+def _version_pair(
+    record: dict[str, Any], candidates: dict[str, dict[str, Any]]
+) -> tuple[str | None, str | None]:
+    candidate = candidates.get(str(record.get("case_id") or ""))
+    if isinstance(candidate, dict):
+        old = candidate.get("old_version")
+        new = candidate.get("new_version")
+        if isinstance(old, str) and isinstance(new, str):
+            return old, new
+    diagnostics = record.get("diagnostics")
+    if isinstance(diagnostics, dict):
+        bumps = diagnostics.get("bumps")
+        if isinstance(bumps, list) and bumps and isinstance(bumps[0], dict):
+            old = bumps[0].get("old_version")
+            new = bumps[0].get("new_version")
+            if isinstance(old, str) and isinstance(new, str):
+                return old, new
+    return None, None
+
+
+def _versions_available(record: dict[str, Any], candidates: dict[str, dict[str, Any]]) -> bool:
+    old, new = _version_pair(record, candidates)
+    if old is None or new is None:
+        return False
+    try:
+        Version(old)
+        Version(new)
+    except InvalidVersion:
+        return False
+    return True
+
+
+def _with_computed_baselines(
+    records: list[dict[str, Any]], candidates: dict[str, dict[str, Any]]
+) -> list[dict[str, Any]]:
+    selected: list[dict[str, Any]] = []
+    for record in records:
+        old, new = _version_pair(record, candidates)
+        stored = record.get("verdicts")
+        verdicts = dict(stored) if isinstance(stored, dict) else {}
+        verdicts["always_safe"] = "SAFE"
+        verdicts["semver_rule"] = semver_rule(old, new)
+        joined = dict(record)
+        joined["verdicts"] = verdicts
+        selected.append(joined)
+    return selected
+
+
 def _is_break_detected(record: dict[str, Any], system: str) -> bool:
     return _verdict(record, system) in {"REVIEW", "LIKELY_BREAKING"}
 
@@ -63,11 +114,18 @@ def _system_metrics(records: list[dict[str, Any]], system: str) -> list[tuple[st
                 sum(1 for record in broke if _verdict(record, system) == "SAFE"), len(broke)
             ),
         ),
-        ("SAFE precision", format_rate(len(safe_ok), len(safe_all))),
         (
             "breakage recall",
             format_rate(
                 sum(1 for record in broke if _is_break_detected(record, system)), len(broke)
+            ),
+        ),
+        ("SAFE precision", format_rate(len(safe_ok), len(safe_all))),
+        (
+            "abstention rate (UNKNOWN)",
+            format_rate(
+                sum(1 for record in scored if _verdict(record, system) == "UNKNOWN"),
+                len(scored),
             ),
         ),
         (
@@ -75,13 +133,6 @@ def _system_metrics(records: list[dict[str, Any]], system: str) -> list[tuple[st
             format_rate(
                 sum(1 for record in broke if _verdict(record, system) == "LIKELY_BREAKING"),
                 len(broke),
-            ),
-        ),
-        (
-            "UNKNOWN rate",
-            format_rate(
-                sum(1 for record in scored if _verdict(record, system) == "UNKNOWN"),
-                len(scored),
             ),
         ),
     ]
@@ -226,10 +277,15 @@ def render_report(
     labels = load_labels(labels_path or base / "labels.jsonl")
     excluded = _load_excluded(excluded_path or base / "excluded.jsonl")
     split_records = [record for record in records if split == "all" or record.get("split") == split]
-    selected, ignored = _join_current_labels(split_records, labels)
-    broke = [record for record in selected if record.get("label") == "BROKE"]
+    joined, ignored = _join_current_labels(split_records, labels)
+    selected = _with_computed_baselines(joined, candidates)
+    scored = [record for record in selected if record.get("label") in LABELS]
+    broke = [record for record in scored if record.get("label") == "BROKE"]
     disputed = [record for record in selected if record.get("label") == "DISPUTED"]
     fingerprints = _fingerprints(selected)
+    unavailable_versions = sum(
+        1 for record in scored if not _versions_available(record, candidates)
+    )
 
     lines = [f"# Benchmark report (split: {split})", ""]
     if len(broke) < 30:
@@ -238,11 +294,20 @@ def render_report(
         lines.extend([f"> Warning: mixed fingerprints: {', '.join(fingerprints)}", ""])
     lines.extend(
         [
+            f"versions unavailable for {unavailable_versions} of {len(scored)} cases "
+            "(baselines counted SAFE)",
+            "",
             "Definitions: false-safe rate = BROKE cases with verdict SAFE / all BROKE cases; "
-            "SAFE precision = OK cases among SAFE verdicts; breakage recall = BROKE cases with "
-            "REVIEW or LIKELY_BREAKING / all BROKE cases; LIKELY_BREAKING-only recall uses only "
-            "LIKELY_BREAKING; UNKNOWN rate = UNKNOWN verdicts / all BROKE and OK cases. "
-            "Every rate is shown as raw k/n with a 95% Wilson interval.",
+            "breakage recall = BROKE cases with REVIEW or LIKELY_BREAKING / all BROKE cases; "
+            "SAFE precision = OK cases among SAFE verdicts; abstention rate (UNKNOWN) = UNKNOWN "
+            "verdicts / all BROKE and OK cases; LIKELY_BREAKING-only recall uses only "
+            "LIKELY_BREAKING. Every rate is shown as raw k/n with a 95% Wilson interval. "
+            "Baselines are computed here from the same current-labeled cases: always_safe is "
+            "SAFE by construction; semver_rule uses baselines.semver_rule, defined as "
+            "'Review major bumps, plus minor bumps while the major version is zero.' Old/new "
+            "versions come from candidates.jsonl, falling back to stored result diagnostics; "
+            "unavailable or invalid versions default to SAFE. Stored baseline verdicts in "
+            "results.jsonl are not used.",
             "",
         ]
     )
@@ -260,7 +325,7 @@ def render_report(
 
     lines.extend(
         [
-            "## UNKNOWN rate by label",
+            "## Abstention rate by label",
             "",
             _table(
                 ["label", *SYSTEMS],
@@ -271,7 +336,7 @@ def render_report(
                             _system_metrics(
                                 [record for record in selected if record.get("label") == label],
                                 system,
-                            )[4][1]
+                            )[3][1]
                             for system in SYSTEMS
                         ],
                     ]
@@ -288,7 +353,6 @@ def render_report(
         if record.get("error_kind") not in (None, "", "none")
     ]
     error_counts = Counter(error_kinds)
-    scored = [record for record in selected if record.get("label") in LABELS]
     lines.extend(
         [
             "## Errors and disputed labels",
@@ -379,14 +443,29 @@ def render_report(
 
     exclusion_counts = Counter(str(item.get("reason") or "other") for item in excluded)
     sampled_counts = Counter(
-        str(candidate.get("sampled_by") or "any")
-        for candidate in candidates.values()
-        if split == "all" or candidate.get("split") == split
+        str(candidate.get("sampled_by") or "any") for candidate in candidates.values()
+    )
+    sampled_order = ("any", "failure", "success")
+    sampled_mix = ", ".join(
+        [f"{key}={sampled_counts.get(key, 0)}" for key in sampled_order]
+        + [
+            f"{key}={sampled_counts[key]}"
+            for key in sorted(sampled_counts)
+            if key not in sampled_order
+        ]
     )
     round2 = any(round_number >= 2 for _, round_number in labels)
     lines.extend(
         [
             "## Selection bias",
+            "",
+            f"Loaded candidates: {len(candidates)}; scored cases in this split: {len(scored)}.",
+            "",
+            "Sampled-by mix: " + sampled_mix,
+            "",
+            "Failure-sampled candidates inflate the BROKE share, so overall rates and accuracy "
+            "from this enriched benchmark must not be quoted; only false-safe among BROKE is "
+            "meaningful here.",
             "",
             "Exclusion reason counts: "
             + (
@@ -394,16 +473,9 @@ def render_report(
                 or "none"
             ),
             "",
-            "Sampled-by mix: "
-            + (
-                ", ".join(f"{key}={value}" for key, value in sorted(sampled_counts.items()))
-                or "none"
-            ),
-            "",
-            "Unbiased sampling had ~2% BROKE (roughly 1 in 50 candidates), so this enriched "
-            "benchmark should not be read as a population rate. `parse_mismatch` and "
-            "`not_single_package` exclusions remain undiagnosed. Labels are single-annotator "
-            "round 1 unless round 2 exists" + (" (round 2 labels are present)." if round2 else "."),
+            "`parse_mismatch` and `not_single_package` exclusions remain undiagnosed. Labels "
+            "are single-annotator round 1 unless round 2 exists"
+            + (" (round 2 labels are present)." if round2 else "."),
             "",
         ]
     )

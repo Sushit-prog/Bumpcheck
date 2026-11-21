@@ -28,3 +28,22 @@ def test_always_safe() -> None:
 )
 def test_semver_rule(old: str, new: str, expected: str) -> None:
     assert semver_rule(make_bump(old, new)) == expected
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "expected"),
+    [
+        ("1.2.3", "2.0.0", "REVIEW"),
+        ("0.1.0", "0.2.0", "REVIEW"),
+        ("1.2.3", "1.3.0", "SAFE"),
+        ("1!1.0", "1!2.0", "REVIEW"),
+        ("1!1.0", "2!1.0", "SAFE"),
+        ("latest", "2.0.0", "SAFE"),
+        (None, "2.0.0", "SAFE"),
+        ("1.0.0", None, "SAFE"),
+    ],
+)
+def test_semver_rule_accepts_version_strings(
+    old: str | None, new: str | None, expected: str
+) -> None:
+    assert semver_rule(old, new) == expected
