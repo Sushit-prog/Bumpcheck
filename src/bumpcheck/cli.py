@@ -28,7 +28,7 @@ from bumpcheck.bench.mine import mine as run_mine
 from bumpcheck.bench.report import write_report
 from bumpcheck.bench.snapshot import directory_size, snapshot_case, snapshot_path
 from bumpcheck.check import check as run_check
-from bumpcheck.check import format_text
+from bumpcheck.check import format_markdown, format_text
 from bumpcheck.envfile import EnvFileError, has_token, load_env
 from bumpcheck.lockdiff import LockParseError, parse_lock_pair
 from bumpcheck.usage import trace_usage
@@ -44,6 +44,7 @@ class LockKind(str, Enum):
 class OutputFormat(str, Enum):
     JSON = "json"
     TEXT = "text"
+    MARKDOWN = "markdown"
 
 
 class FailOn(str, Enum):
@@ -321,6 +322,8 @@ def check(
 
     if output_format == OutputFormat.TEXT:
         typer.echo(format_text(result))
+    elif output_format == OutputFormat.MARKDOWN:
+        typer.echo(format_markdown(result))
     else:
         typer.echo(result.model_dump_json(indent=2))
 

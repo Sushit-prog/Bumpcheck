@@ -10,7 +10,7 @@ from typer.testing import CliRunner
 from bumpcheck import check as check_module
 from bumpcheck import cli
 from bumpcheck.apidiff import ApiChange, ApiDiffResult, Location
-from bumpcheck.check import check
+from bumpcheck.check import check, format_markdown
 from bumpcheck.cli import app
 from bumpcheck.projectpython import ProjectPythonSet
 from bumpcheck.rules import PythonSupportContext
@@ -332,6 +332,35 @@ def test_cli_check_text(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
     assert "SAFE pkg 1.0.0->2.0.0 [R2] rationale" in result.output
     assert "  app.py:3 call pkg.Client" in result.output
     assert result.output.strip().endswith("overall: SAFE")
+
+
+def test_cli_check_markdown(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cli, "run_check", lambda *args, **kwargs: _check_result("SAFE"))
+
+    result = _invoke_check(tmp_path, "--format", "markdown")
+
+    assert result.exit_code == 0
+    assert "## BumpCheck: SAFE" in result.output
+    assert "| `pkg` | `1.0.0` → `2.0.0` | SAFE | R2 | rationale |" in result.output
+    assert "- `app.py:3` — call pkg.Client" in result.output
+    assert "It does not prove runtime or behavioral compatibility." in result.output
+
+
+def test_format_markdown_escapes_cells_and_prints_warnings() -> None:
+    bump = BumpVerdict(
+        package="pkg",
+        old_version="1.0.0",
+        new_version="2.0.0",
+        verdict="REVIEW",
+        rule_id="R5",
+        rationale="one | two\nthree",
+    )
+    result = CheckResult(overall="REVIEW", bumps=(bump,), warnings=("warn | now",))
+
+    text = format_markdown(result)
+
+    assert "one \\| two three" in text
+    assert "- warn \\| now" in text
 
 
 def test_cli_check_fail_on_threshold(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

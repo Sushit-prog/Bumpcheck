@@ -1,0 +1,187 @@
+name: BumpCheck
+description: Check dependency bumps in a pull request and post a sticky Markdown summary.
+inputs:
+  github-token:
+    description: Token used to fetch PR refs and write the sticky comment.
+    required: true
+  lockfile:
+    description: Lockfile path relative to the repository root.
+    required: false
+    default: uv.lock
+  lock-kind:
+    description: Lockfile kind; empty auto-detects from the path.
+    required: false
+    default: ""
+  fail-on:
+    description: Fail the action when the overall verdict is at or above this level.
+    required: false
+    default: REVIEW
+  comment:
+    description: Post or update a sticky pull request comment.
+    required: false
+    default: "true"
+  artifact-name:
+    description: Name of the uploaded report artifact.
+    required: false
+    default: bumpcheck-report
+outputs:
+  overall:
+    description: Overall BumpCheck verdict, or SKIPPED/ERROR.
+    value: ${{ steps.run.outputs.overall }}
+  report-path:
+    description: Path to the generated Markdown report.
+    value: ${{ steps.run.outputs.report-path }}
+  exit-code:
+    description: Exit code produced by bumpcheck check.
+    value: ${{ steps.run.outputs.exit-code }}
+runs:
+  using: composite
+  steps:
+    - name: Check out base ref
+      uses: actions/checkout@v4
+      with:
+        ref: ${{ github.base_ref }}
+        fetch-depth: 0
+        persist-credentials: false
+        token: ${{ inputs.github-token }}
+
+    - name: Install uv
+      uses: astral-sh/setup-uv@v5
+      with:
+        python-version: "3.11"
+
+    - name: Install BumpCheck
+      shell: bash
+      run: uv sync --frozen
+
+    - name: Run BumpCheck
+      id: run
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        LOCKFILE: ${{ inputs.lockfile }}
+        LOCK_KIND: ${{ inputs.lock-kind }}
+        FAIL_ON: ${{ inputs.fail-on }}
+        BASE_REF: ${{ github.base_ref }}
+        PR_NUMBER: ${{ github.event.number }}
+      run: |
+        set -euo pipefail
+        work="$RUNNER_TEMP/bumpcheck"
+        report="$work/report.md"
+        old_lock="$work/old.lock"
+        new_lock="$work/new.lock"
+        pr_tree="$work/pr"
+        mkdir -p "$work"
+
+        git -c http.extraheader="AUTHORIZATION: bearer ${GH_TOKEN}" fetch --no-tags origin "${BASE_REF}:bumpcheck-base"
+        git -c http.extraheader="AUTHORIZATION: bearer ${GH_TOKEN}" fetch --no-tags origin "pull/${PR_NUMBER}/head:bumpcheck-pr"
+
+        if ! git show "bumpcheck-base:${LOCKFILE}" > "$old_lock" 2>/dev/null; then
+          printf '## BumpCheck: skipped\n\nThe configured lockfile was not present on the base side of the pull request.\n' > "$report"
+          echo "overall=SKIPPED" >> "$GITHUB_OUTPUT"
+          echo "report-path=$report" >> "$GITHUB_OUTPUT"
+          echo "exit-code=0" >> "$GITHUB_OUTPUT"
+          echo "skip=true" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        if ! git show "bumpcheck-pr:${LOCKFILE}" > "$new_lock" 2>/dev/null; then
+          printf '## BumpCheck: skipped\n\nThe configured lockfile was not present on the pull request side.\n' > "$report"
+          echo "overall=SKIPPED" >> "$GITHUB_OUTPUT"
+          echo "report-path=$report" >> "$GITHUB_OUTPUT"
+          echo "exit-code=0" >> "$GITHUB_OUTPUT"
+          echo "skip=true" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        git worktree add --detach "$pr_tree" "bumpcheck-pr"
+
+        if [ -n "${LOCK_KIND}" ]; then
+          kind="${LOCK_KIND}"
+        else
+          case "$LOCKFILE" in
+            *uv.lock) kind="uv.lock" ;;
+            *poetry.lock) kind="poetry.lock" ;;
+            *requirements*|*.txt) kind="requirements" ;;
+            *) kind="uv.lock" ;;
+          esac
+        fi
+
+        set +e
+        uv run bumpcheck check "$pr_tree" "$old_lock" "$new_lock" --kind "$kind" --format markdown --fail-on "$FAIL_ON" > "$report"
+        status=$?
+        set -e
+
+        overall=$(sed -n 's/^## BumpCheck: //p' "$report" | sed -n '1p')
+        if [ -z "$overall" ]; then
+          overall="ERROR"
+        fi
+        if [ ! -s "$report" ]; then
+          printf '## BumpCheck: ERROR\n\nBumpCheck produced no report output.\n' > "$report"
+        fi
+
+        echo "overall=$overall" >> "$GITHUB_OUTPUT"
+        echo "report-path=$report" >> "$GITHUB_OUTPUT"
+        echo "exit-code=$status" >> "$GITHUB_OUTPUT"
+        echo "skip=false" >> "$GITHUB_OUTPUT"
+
+    - name: Upload report
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: ${{ steps.run.outputs.report-path }}
+        if-no-files-found: warn
+
+    - name: Post sticky PR comment
+      if: inputs.comment == 'true'
+      uses: actions/github-script@v7
+      env:
+        REPORT_PATH: ${{ steps.run.outputs.report-path }}
+        RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        PR_NUMBER: ${{ github.event.number }}
+      with:
+        github-token: ${{ inputs.github-token }}
+        script: |
+          const fs = require('fs');
+          const marker = '<!-- bumpcheck -->';
+          const report = fs.readFileSync(process.env.REPORT_PATH, 'utf8');
+          const runLink = `\n\n[Workflow run](${process.env.RUN_URL})`;
+          const limit = 60000;
+          let body = `${marker}\n${report}${runLink}`;
+          if (body.length > limit) {
+            body = body.slice(0, limit) + '\n\nReport truncated; see the workflow artifact.';
+          }
+          const { owner, repo } = context.repo;
+          const issue_number = Number(process.env.PR_NUMBER);
+          const comments = await github.paginate(github.rest.issues.listComments, {
+            owner,
+            repo,
+            issue_number,
+            per_page: 100,
+          });
+          const existing = comments.find(comment => comment.body && comment.body.includes(marker));
+          if (existing) {
+            await github.rest.issues.updateComment({
+              owner,
+              repo,
+              comment_id: existing.id,
+              body,
+            });
+          } else {
+            await github.rest.issues.createComment({
+              owner,
+              repo,
+              issue_number,
+              body,
+            });
+          }
+
+    - name: Enforce verdict threshold
+      if: steps.run.outputs.skip != 'true'
+      shell: bash
+      env:
+        EXIT_CODE: ${{ steps.run.outputs.exit-code }}
+      run: |
+        if [ "${EXIT_CODE}" != "0" ]; then
+          exit "${EXIT_CODE}"
+        fi

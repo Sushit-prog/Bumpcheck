@@ -187,3 +187,58 @@ def format_text(result: CheckResult) -> str:
             lines.append(f"  {location}{item.summary}")
     lines.append(f"overall: {result.overall}")
     return "\n".join(lines)
+
+
+def _md_cell(value: str) -> str:
+    return value.replace("|", "\\|").replace("\n", " ").strip()
+
+
+def format_markdown(result: CheckResult) -> str:
+    """Render a check result as a compact Markdown report for pull requests."""
+    lines = [f"## BumpCheck: {result.overall}", "", "Overall verdict: `" + result.overall + "`"]
+    if result.bumps:
+        lines.extend(
+            [
+                "",
+                "| Package | Change | Verdict | Rule | Rationale |",
+                "| --- | --- | --- | --- | --- |",
+            ]
+        )
+        for bump in result.bumps:
+            old = bump.old_version or "?"
+            new = bump.new_version or "?"
+            lines.append(
+                "| `{package}` | `{old}` → `{new}` | {verdict} | {rule} | {rationale} |".format(
+                    package=_md_cell(bump.package),
+                    old=_md_cell(old),
+                    new=_md_cell(new),
+                    verdict=bump.verdict,
+                    rule=bump.rule_id,
+                    rationale=_md_cell(bump.rationale),
+                )
+            )
+    else:
+        lines.extend(["", "No comparable dependency bumps found."])
+
+    evidence_lines = [item for bump in result.bumps for item in bump.evidence]
+    if evidence_lines:
+        lines.append("")
+        lines.append("Evidence:")
+        for item in evidence_lines:
+            location = f"`{item.file}:{item.line}`" if item.file is not None and item.line else None
+            label = f"{location} — " if location else ""
+            lines.append(f"- {label}{_md_cell(item.summary)}")
+
+    if result.warnings:
+        lines.append("")
+        lines.append("Warnings:")
+        lines.extend(f"- {_md_cell(warning)}" for warning in result.warnings)
+
+    lines.extend(
+        [
+            "",
+            "> SAFE means no relevant static API changes or direct usages were found. "
+            "It does not prove runtime or behavioral compatibility.",
+        ]
+    )
+    return "\n".join(lines)

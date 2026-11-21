@@ -135,6 +135,27 @@ no direct usages that match them. It covers API signatures and direct static
 usage only. It does not prove behavioral compatibility, transitive breakage,
 runtime-only imports, or usage reached through untraced instance flow.
 
+## GitHub Action
+
+The root `action.yml` is a reusable composite action that compares the base
+and head versions of one lockfile, uploads a Markdown report, and posts a
+sticky pull request comment. This repository also uses it in
+`.github/workflows/bumpcheck-pr.yml`:
+
+```
+uses: Sushit-prog/Bumpcheck@main
+with:
+  github-token: ${{ secrets.GITHUB_TOKEN }}
+  lockfile: uv.lock
+  fail-on: REVIEW
+```
+
+Inputs are `github-token`, `lockfile` (default `uv.lock`), `lock-kind`
+(auto-detected when empty), `fail-on` (default `REVIEW`), `comment` (default
+`true`), and `artifact-name`. The action checks out the base ref for tooling and
+reads pull request files as Git data, so the PR's code is never executed. A
+workflow using the action needs `contents: read` and `pull-requests: write`.
+
 ## Benchmark
 
 Mine public Dependabot and Renovate pull requests into hand-labellable
