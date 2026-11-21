@@ -15,6 +15,8 @@ from bumpcheck.cli import app
 
 FIXTURE = Path(__file__).parent / "fixtures" / "workflows" / "pylint.yml"
 UNQUOTED_FIXTURE = Path(__file__).parent / "fixtures" / "workflows" / "unquoted_python.yml"
+PYNESSIE_FIXTURE = Path(__file__).parent / "fixtures" / "workflows" / "pynessie_ci.yml"
+VM1_FIXTURE = Path(__file__).parent / "fixtures" / "workflows" / "vm1_ci.yml"
 API = "https://api.github.com"
 RAW = "https://raw.githubusercontent.com/acme/widgets"
 REPO = "acme/widgets"
@@ -196,6 +198,18 @@ def _inspect(
     )
 
 
+def _base_header_has_status(report: str) -> bool:
+    lines = report.splitlines()
+    for index, line in enumerate(lines):
+        if not line.startswith("base already incompatible:"):
+            continue
+        if line != "base already incompatible:":
+            return True
+        if index + 1 < len(lines):
+            return bool(lines[index + 1].strip())
+    return False
+
+
 def test_pypi_metadata_and_dependency_diff(tmp_path: Path) -> None:
     pypi = {
         _pypi_url("2.31.0"): _pypi_bytes(
@@ -216,6 +230,17 @@ def test_pypi_metadata_and_dependency_diff(tmp_path: Path) -> None:
     assert "- olddep<2" in report
     assert "~ changed: changed>=1 -> changed>=2" in report
     assert "~ requests: requests>=2.31.0 -> requests>=2.32.0" in report
+
+
+def test_dependency_change_line_is_capped(tmp_path: Path) -> None:
+    new_dist = ["requests>=2.32.0", *(f"extra{index}>=1" for index in range(11))]
+    pypi = {
+        _pypi_url("2.31.0"): _pypi_bytes("2.31.0", ">=3.8", ["requests>=2.31.0"]),
+        _pypi_url("2.32.0"): _pypi_bytes("2.32.0", ">=3.10", new_dist),
+    }
+    report = _inspect(tmp_path, _candidate(), pypi=pypi)
+    assert "dependency changes: 12 changes (10 shown):" in report
+    assert "(+2 more)" in report
 
 
 def test_workflow_matrix_and_run_lines_from_fixture(tmp_path: Path) -> None:
@@ -300,6 +325,20 @@ def test_offline_cache_replay_makes_no_network_calls(tmp_path: Path) -> None:
     assert "lockfile changes:" in report
 
 
+@pytest.mark.parametrize(
+    ("merged", "expected"),
+    [
+        (False, "not merged"),
+        (True, "unavailable"),
+    ],
+)
+def test_merged_at_distinguishes_unmerged_from_unavailable(
+    tmp_path: Path, merged: bool, expected: str
+) -> None:
+    report = _inspect(tmp_path, _candidate(merged=merged, merged_at=None))
+    assert f"merged_at: {expected}" in report
+
+
 def test_lockfile_diff_keeps_only_package_lines(tmp_path: Path) -> None:
     old_lock = "requests==2.31.0\nunrelated==1.0.0\n"
     new_lock = "requests==2.32.0\nunrelated==2.0.0\n"
@@ -328,6 +367,52 @@ def test_failing_check_inference(tmp_path: Path) -> None:
     assert "Pylint (3.10) (failure) -> pylint.yml job lint [3.10]" in report
     assert "unknown check (timed_out) -> unavailable" in report
     assert "docs (success)" not in report
+
+
+def test_pynessie_image_tag_is_not_a_python_version(tmp_path: Path) -> None:
+    json_responses, bytes_responses = _responses(
+        workflow_text=PYNESSIE_FIXTURE.read_text(encoding="utf-8"),
+        old_lock="requests==2.31.0\n",
+    )
+    candidate = _candidate(
+        ci_checks=[
+            {"name": "CI Python (3.8)", "conclusion": "failure"},
+            {
+                "name": "CI Nessie Image (ghcr.io/projectnessie/nessie:0.63.0)",
+                "conclusion": "failure",
+            },
+        ]
+    )
+    report = _inspect(
+        tmp_path,
+        candidate,
+        json_responses=json_responses,
+        bytes_responses=bytes_responses,
+        max_pypi_lookups=40,
+    )
+    assert "python-version matrix: 3.8, 3.9, 3.10, 3.11, 3.12" in report
+    assert "CI Python (3.8) (failure) -> pylint.yml job python [3.8]" in report
+    assert "unmatched check-name version: 0.63.0" in report
+    assert "Python 0.63" not in report
+
+
+def test_vm1_undeclared_check_version_is_not_evaluated(tmp_path: Path) -> None:
+    json_responses, bytes_responses = _responses(
+        workflow_text=VM1_FIXTURE.read_text(encoding="utf-8"),
+        old_lock="requests==2.31.0\n",
+    )
+    candidate = _candidate(ci_checks=[{"name": "build (2.7)", "conclusion": "failure"}])
+    report = _inspect(
+        tmp_path,
+        candidate,
+        json_responses=json_responses,
+        bytes_responses=bytes_responses,
+        max_pypi_lookups=40,
+    )
+    assert "build (2.7) (failure) -> pylint.yml job build" in report
+    assert "unmatched check-name version: 2.7" in report
+    assert "Python 2.7" not in report
+    assert _base_header_has_status(report)
 
 
 def test_output_has_no_query_strings_or_credentials(tmp_path: Path) -> None:
@@ -415,7 +500,7 @@ def test_base_contamination_truncates_pin_lookups(tmp_path: Path) -> None:
     assert "base check truncated: 1 of 3 pins checked" in report
 
 
-def test_base_contamination_matrix_versions_and_non_concrete(tmp_path: Path) -> None:
+def test_base_contamination_rejects_undeclared_check_version(tmp_path: Path) -> None:
     old_lock = "requests==2.31.0\nunrelated==1.0.0\n"
     json_responses, bytes_responses = _responses(old_lock=old_lock)
     pypi = _default_pypi()
@@ -430,7 +515,8 @@ def test_base_contamination_matrix_versions_and_non_concrete(tmp_path: Path) -> 
         max_pypi_lookups=40,
     )
     assert "(matrix versions)" in report
-    assert "non-concrete: 3.x" in report
+    assert "unmatched check-name version: 3.x" in report
+    assert "Python 3.x" not in report
 
 
 def test_sibling_pr_lines_use_two_windows(tmp_path: Path) -> None:
@@ -446,7 +532,7 @@ def test_sibling_pr_lines_use_two_windows(tmp_path: Path) -> None:
     ) in report
 
 
-def test_inspect_batch_condenses_and_caches_pypi(tmp_path: Path) -> None:
+def test_inspect_batch_reuses_sections_and_caches_pypi(tmp_path: Path) -> None:
     first = _candidate(label_suggestion="BROKE_SUSPECT")
     second = _candidate(
         case_id="acme/widgets#2",
@@ -484,6 +570,13 @@ def test_inspect_batch_condenses_and_caches_pypi(tmp_path: Path) -> None:
     assert "=== acme/widgets#1 ===" in text
     assert "=== acme/widgets#2 ===" in text
     assert "case: acme/widgets#2" in text
+    assert "old requires_python: >=3.8" in text
+    assert "new requires_python: >=3.10" in text
+    assert "raw python-version scalars:" in text
+    assert "dependency changes: 1 change (1 shown):" in text
+    assert "diff omitted in batch" in text
+    assert _base_header_has_status(text)
+    assert "        run:" not in text
     assert "label_suggestion" not in text
     assert "BROKE_SUSPECT" not in text
     assert calls[_pypi_url("1.0.0", "unrelated")] == 1

@@ -47,7 +47,15 @@ _URL_QUERY_RE = re.compile(r"(https?://[^\s?#]+)\?[^\s]*")
 _CREDENTIAL_RE = re.compile(r"(https?://)[^/\s:@]+:[^/\s@]+@")
 _MATRIX_EXPRESSION_RE = re.compile(r"\$\{\{\s*matrix\.([A-Za-z0-9_-]+)\s*\}\}")
 _PLAIN_FLOAT_RE = re.compile(r"(\d+)\.(\d+)")
-_VERSION_NAME_RE = re.compile(r"(?<![\d.])(\d+(?:\.(?:\d+|[xX*])){1,2})(?![\d.])")
+_CHECK_TOKEN_RE = re.compile(r"[^()\[\]\s]+")
+_VERSION_LIKE_RE = re.compile(
+    r"(?<![\d.])(\d+(?:\.(?:\d+|[xX*])){1,2}(?:t|-dev)?)(?![\d.])",
+    re.IGNORECASE,
+)
+_STRICT_PYTHON_TOKEN_RE = re.compile(
+    r"(?:3\.(?:[0-9]|[1-9][0-9])|2\.7)(?:t|-dev)?\Z",
+    re.IGNORECASE,
+)
 _VERSION_KEYS = frozenset({"python-version", "python-version-file"})
 
 
@@ -85,6 +93,13 @@ class DependencyChanges:
     added: tuple[str, ...]
     removed: tuple[str, ...]
     changed: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...]
+
+
+@dataclass(frozen=True)
+class CheckLocation:
+    path: str
+    job_id: str
+    version: str | None
 
 
 PypiCache = dict[tuple[str, str], PypiInfo | None]
@@ -586,16 +601,49 @@ def _lockfile_diff(
     return _filter_diff_for_package(list(diff), package)
 
 
-def _version_in_name(version: str, check_name: str) -> bool:
-    if not version:
-        return False
-    return bool(re.search(rf"(?<![\d.]){re.escape(version)}(?![\d.])", check_name))
+def _check_name_tokens(check_name: str) -> tuple[str, ...]:
+    tokens: list[str] = []
+    for raw in _CHECK_TOKEN_RE.findall(check_name):
+        token = raw.strip(".,;:")
+        if not token or ":" in token or "/" in token:
+            continue
+        tokens.append(token)
+    return tuple(tokens)
+
+
+def _check_version_tokens(check_name: str) -> tuple[str, ...]:
+    return tuple(match.group(1) for match in _VERSION_LIKE_RE.finditer(check_name))
+
+
+def _unmatched_check_versions(check_name: str, accepted: str | None) -> tuple[str, ...]:
+    return tuple(token for token in _check_version_tokens(check_name) if token != accepted)
+
+
+def _strict_python_token(token: str) -> ConcretePythonVersion | None:
+    if _STRICT_PYTHON_TOKEN_RE.fullmatch(token) is None:
+        return None
+    result = interpret_python_version(token, source="version")
+    return result if isinstance(result, ConcretePythonVersion) else None
+
+
+def _job_versions(job: WorkflowJob) -> set[tuple[int, int]]:
+    versions: set[tuple[int, int]] = set()
+    for scalar in job.python_versions:
+        result = interpret_python_version(scalar.raw, source=scalar.source)
+        if isinstance(result, ConcretePythonVersion):
+            versions.add((result.major, result.minor))
+    return versions
 
 
 def infer_check_location(
     workflows: tuple[WorkflowFile, ...] | list[WorkflowFile], check_name: str
-) -> tuple[str, str, str | None] | None:
+) -> CheckLocation | None:
     lowered = check_name.lower()
+    strict_tokens: list[tuple[str, ConcretePythonVersion]] = []
+    for token in _check_name_tokens(check_name):
+        version = _strict_python_token(token)
+        if version is not None:
+            strict_tokens.append((token, version))
     best: tuple[int, str, str, str | None] | None = None
     for workflow in workflows:
         for job in workflow.jobs:
@@ -606,14 +654,12 @@ def infer_check_location(
             name = (job.name or "").lower()
             if name and (name == lowered or name in lowered):
                 score += 2
-            matched_version = None
-            for scalar in job.python_versions:
-                result = interpret_python_version(scalar.raw, source=scalar.source)
-                if not isinstance(result, ConcretePythonVersion):
-                    continue
-                if _version_in_name(scalar.raw, check_name):
+            declared = _job_versions(job)
+            matched_version: str | None = None
+            for token, version in strict_tokens:
+                if (version.major, version.minor) in declared:
                     score += 1
-                    matched_version = scalar.raw
+                    matched_version = token
                     break
             if score <= 0:
                 continue
@@ -622,7 +668,7 @@ def infer_check_location(
                 best = (score, workflow.path, job.job_id, matched_version)
     if best is None:
         return None
-    return best[1], best[2], best[3]
+    return CheckLocation(path=best[1], job_id=best[2], version=best[3])
 
 
 def _header_lines(candidate: dict[str, Any]) -> list[str]:
@@ -636,7 +682,13 @@ def _header_lines(candidate: dict[str, Any]) -> list[str]:
     package = str(candidate.get("package") or "unavailable")
     old_version = candidate.get("old_version") or "?"
     new_version = candidate.get("new_version") or "?"
-    merged_at = candidate.get("merged_at") or "unavailable"
+    raw_merged_at = candidate.get("merged_at")
+    if isinstance(raw_merged_at, str) and raw_merged_at.strip():
+        merged_at = raw_merged_at
+    elif candidate.get("merged") is False:
+        merged_at = "not merged"
+    else:
+        merged_at = "unavailable"
     return [
         f"case: {candidate.get('case_id', '')}",
         f"url: {url}",
@@ -664,15 +716,19 @@ def _pypi_lines(old_info: PypiInfo | None, new_info: PypiInfo | None) -> list[st
     if not (changes.added or changes.removed or changes.changed):
         lines.append("  dependency changes: none")
         return lines
-    lines.append("  dependency changes:")
-    for line in changes.added:
-        lines.append(f"    + {line}")
-    for line in changes.removed:
-        lines.append(f"    - {line}")
+    entries = [f"+ {line}" for line in changes.added]
+    entries.extend(f"- {line}" for line in changes.removed)
     for name, old_lines, new_lines in changes.changed:
         old_text = ", ".join(old_lines) or "none"
         new_text = ", ".join(new_lines) or "none"
-        lines.append(f"    ~ {name}: {old_text} -> {new_text}")
+        entries.append(f"~ {name}: {old_text} -> {new_text}")
+    count = len(entries)
+    shown = entries[:10]
+    more = f" (+{count - 10} more)" if count > 10 else ""
+    label = "change" if count == 1 else "changes"
+    lines.append(
+        f"  dependency changes: {count} {label} ({len(shown)} shown): " + "; ".join(shown) + more
+    )
     return lines
 
 
@@ -707,7 +763,13 @@ def _format_version_scalar(scalar: VersionScalar) -> str:
     return scalar.raw
 
 
-def _workflow_lines(files: list[WorkflowFile], failures: list[str], listing_ok: bool) -> list[str]:
+def _workflow_lines(
+    files: list[WorkflowFile],
+    failures: list[str],
+    listing_ok: bool,
+    *,
+    include_runs: bool = True,
+) -> list[str]:
     if not listing_ok:
         return ["workflows: unavailable"]
     if not files and not failures:
@@ -737,12 +799,13 @@ def _workflow_lines(files: list[WorkflowFile], failures: list[str], listing_ok: 
                 else "none"
             )
             lines.append(f"        raw python-version scalars: {raw}")
-            lines.append("        run:")
-            if job.run_lines:
-                for run in job.run_lines:
-                    lines.append(f"          - {run}")
-            else:
-                lines.append("          none")
+            if include_runs:
+                lines.append("        run:")
+                if job.run_lines:
+                    for run in job.run_lines:
+                        lines.append(f"          - {run}")
+                else:
+                    lines.append("          none")
     for name in failures:
         lines.append(f"  {name}: unavailable")
     return lines
@@ -754,6 +817,8 @@ def _lockfile_lines(
     base_repo: str,
     head_repo: str,
     package: str,
+    *,
+    include_diff: bool = True,
 ) -> list[str]:
     paths = candidate.get("lockfile_paths")
     if not isinstance(paths, list) or not paths:
@@ -775,9 +840,11 @@ def _lockfile_lines(
             lines.append("    unavailable")
         elif not diff:
             lines.append("    no package lines changed")
-        else:
+        elif include_diff:
             for line in diff:
                 lines.append(f"    {line}")
+        else:
+            lines.append("    diff omitted in batch")
     return lines
 
 
@@ -787,6 +854,7 @@ def _verdict_lines(
     new_info: PypiInfo | None,
     old_version_available: bool,
     repo_requires_python: str | None,
+    check_versions: dict[Version, str] | None = None,
 ) -> list[str]:
     versions: dict[Version, str] = {}
     non_concrete: list[str] = []
@@ -811,6 +879,8 @@ def _verdict_lines(
         floor = python_floor(repo_requires_python)
         if floor is not None:
             versions.setdefault(floor, str(floor))
+    for version in check_versions or {}:
+        versions.setdefault(version, str(version))
     if not versions and not non_concrete:
         return ["verdict hints: none"]
     new_spec = new_info.requires_python if new_info else None
@@ -854,12 +924,14 @@ def _failing_check_lines(candidate: dict[str, Any], workflows: list[WorkflowFile
         name = str(check.get("name") or "")
         conclusion = str(check.get("conclusion") or "")
         location = infer_check_location(workflows, name)
+        accepted = location.version if location is not None else None
+        suffix = f" [{accepted}]" if accepted else ""
+        for unmatched in _unmatched_check_versions(name, accepted):
+            suffix += f"; unmatched check-name version: {unmatched}"
         if location is None:
-            lines.append(f"  {name} ({conclusion}) -> unavailable")
+            lines.append(f"  {name} ({conclusion}) -> unavailable{suffix}")
             continue
-        path, job_id, version = location
-        suffix = f" [{version}]" if version else ""
-        lines.append(f"  {name} ({conclusion}) -> {path} job {job_id}{suffix}")
+        lines.append(f"  {name} ({conclusion}) -> {location.path} job {location.job_id}{suffix}")
     return lines
 
 
@@ -876,18 +948,17 @@ def _failing_targets(
     candidate: dict[str, Any], workflows: list[WorkflowFile]
 ) -> tuple[dict[Version, str], list[str]]:
     concrete: dict[Version, str] = {}
-    non_concrete: list[str] = []
+    notices: list[str] = []
     for check in _failing_checks(candidate):
         name = str(check.get("name") or "")
-        match = _VERSION_NAME_RE.search(name)
-        if match is None:
-            continue
-        raw = match.group(1)
-        result = interpret_python_version(raw, source="version")
-        if isinstance(result, NonConcretePythonVersion):
-            non_concrete.append(f"{raw} (non-concrete: {result.reason}; check {name})")
-        else:
-            concrete.setdefault(result.as_version(), name)
+        location = infer_check_location(workflows, name)
+        accepted = location.version if location is not None else None
+        if accepted is not None:
+            result = _strict_python_token(accepted)
+            if result is not None:
+                concrete.setdefault(result.as_version(), name)
+        for unmatched in _unmatched_check_versions(name, accepted):
+            notices.append(f"unmatched check-name version: {unmatched} (check {name})")
 
     matrix: dict[Version, str] = {}
     for workflow in workflows:
@@ -895,14 +966,12 @@ def _failing_targets(
             for scalar in job.python_versions:
                 result = interpret_python_version(scalar.raw, source=scalar.source)
                 if isinstance(result, NonConcretePythonVersion):
-                    non_concrete.append(
-                        f"{scalar.raw} (non-concrete: {result.reason}; {workflow.path})"
-                    )
+                    notices.append(f"non-concrete: {scalar.raw} ({result.reason}; {workflow.path})")
                 else:
                     matrix.setdefault(result.as_version(), "matrix versions")
     if not concrete:
         concrete = matrix
-    return concrete, list(dict.fromkeys(non_concrete))
+    return concrete, list(dict.fromkeys(notices))
 
 
 def _lockfile_kind(candidate: dict[str, Any], path: str) -> str:
@@ -953,14 +1022,14 @@ def _base_contamination_lines(
     client: GitHubClient,
     candidate: dict[str, Any],
     base_repo: str,
-    workflows: list[WorkflowFile],
     pypi_fetch: Callable[[str], bytes] | None,
     cache: PypiCache,
     max_pypi_lookups: int,
+    targets: dict[Version, str],
+    check_notices: list[str],
 ) -> list[str]:
-    targets, non_concrete = _failing_targets(candidate, workflows)
     if not targets:
-        notices = [f"  non-concrete: {item}; not evaluated" for item in non_concrete]
+        notices = [f"  {item}; not evaluated" for item in check_notices]
         return [_BASE_NO_FINDING, *notices]
     pins, undetermined = _base_pins(client, candidate, base_repo)
     notices: list[str] = list(undetermined)
@@ -978,8 +1047,8 @@ def _base_contamination_lines(
                     f"  {name}=={version} requires_python {info.requires_python} excludes "
                     f"Python {target} ({label})"
                 )
-    for item in non_concrete:
-        notices.append(f"  non-concrete: {item}; not evaluated")
+    for item in check_notices:
+        notices.append(f"  {item}; not evaluated")
     if not findings:
         return [_BASE_NO_FINDING, *notices]
     return ["base already incompatible:", *notices, *dict.fromkeys(findings)]
@@ -1085,6 +1154,83 @@ def _sibling_pr_lines(
     ]
 
 
+def _render_case_report(
+    candidate: dict[str, Any],
+    *,
+    dir: Path,
+    also_dirs: list[Path] | None,
+    active_client: GitHubClient,
+    pypi_fetch: Callable[[str], bytes] | None,
+    cache: PypiCache,
+    max_pypi_lookups: int,
+    include_lockfile_diff: bool = True,
+    include_workflow_runs: bool = True,
+) -> list[str]:
+    package = str(candidate.get("package") or "")
+    old_version = candidate.get("old_version")
+    new_version = candidate.get("new_version")
+    old_version = old_version if isinstance(old_version, str) else None
+    new_version = new_version if isinstance(new_version, str) else None
+
+    old_info = _fetch_pypi(active_client, package, old_version, pypi_fetch, cache)
+    new_info = _fetch_pypi(active_client, package, new_version, pypi_fetch, cache)
+    base_repo, head_repo = _resolve_repos(active_client, candidate)
+    head_sha = str(candidate.get("head_sha") or "")
+    workflows, failures, listing_ok = _fetch_workflows(active_client, head_repo, head_sha)
+    repo_requires_python = _fetch_requires_python(active_client, head_repo, head_sha)
+    targets, check_notices = _failing_targets(candidate, workflows)
+
+    lines = _header_lines(candidate)
+    lines.extend(_pypi_lines(old_info, new_info))
+    lines.extend(
+        _workflow_lines(workflows, failures, listing_ok, include_runs=include_workflow_runs)
+    )
+    lines.extend(
+        _lockfile_lines(
+            active_client,
+            candidate,
+            base_repo,
+            head_repo,
+            package,
+            include_diff=include_lockfile_diff,
+        )
+    )
+    if repo_requires_python:
+        lines.append(f"repo requires-python: {repo_requires_python}")
+    lines.extend(
+        _verdict_lines(
+            workflows,
+            old_info,
+            new_info,
+            old_version is not None,
+            repo_requires_python,
+            targets,
+        )
+    )
+    lines.extend(_failing_check_lines(candidate, workflows))
+    lines.extend(
+        _base_contamination_lines(
+            active_client,
+            candidate,
+            base_repo,
+            pypi_fetch,
+            cache,
+            max(0, max_pypi_lookups),
+            targets,
+            check_notices,
+        )
+    )
+    lines.extend(
+        _sibling_pr_lines(
+            active_client,
+            candidate,
+            directory=dir,
+            also_dirs=also_dirs,
+        )
+    )
+    return lines
+
+
 def inspect_case(
     case_id: str,
     *,
@@ -1105,94 +1251,16 @@ def inspect_case(
         offline=offline,
         max_rate_limit_wait_s=max_rate_limit_wait_s,
     )
-    package = str(candidate.get("package") or "")
-    old_version = candidate.get("old_version")
-    new_version = candidate.get("new_version")
-    old_version = old_version if isinstance(old_version, str) else None
-    new_version = new_version if isinstance(new_version, str) else None
-
-    cache = pypi_cache if pypi_cache is not None else {}
-    old_info = _fetch_pypi(active_client, package, old_version, pypi_fetch, cache)
-    new_info = _fetch_pypi(active_client, package, new_version, pypi_fetch, cache)
-    base_repo, head_repo = _resolve_repos(active_client, candidate)
-    head_sha = str(candidate.get("head_sha") or "")
-    workflows, failures, listing_ok = _fetch_workflows(active_client, head_repo, head_sha)
-    repo_requires_python = _fetch_requires_python(active_client, head_repo, head_sha)
-
-    lines = _header_lines(candidate)
-    lines.extend(_pypi_lines(old_info, new_info))
-    lines.extend(_workflow_lines(workflows, failures, listing_ok))
-    lines.extend(_lockfile_lines(active_client, candidate, base_repo, head_repo, package))
-    if repo_requires_python:
-        lines.append(f"repo requires-python: {repo_requires_python}")
-    lines.extend(
-        _verdict_lines(
-            workflows,
-            old_info,
-            new_info,
-            old_version is not None,
-            repo_requires_python,
-        )
-    )
-    lines.extend(_failing_check_lines(candidate, workflows))
-    lines.extend(
-        _base_contamination_lines(
-            active_client,
-            candidate,
-            base_repo,
-            workflows,
-            pypi_fetch,
-            cache,
-            max(0, max_pypi_lookups),
-        )
-    )
-    lines.extend(
-        _sibling_pr_lines(
-            active_client,
-            candidate,
-            directory=dir,
-            also_dirs=also_dirs,
-        )
+    lines = _render_case_report(
+        candidate,
+        dir=dir,
+        also_dirs=also_dirs,
+        active_client=active_client,
+        pypi_fetch=pypi_fetch,
+        cache=pypi_cache if pypi_cache is not None else {},
+        max_pypi_lookups=max_pypi_lookups,
     )
     return "\n".join(redact(line) for line in lines) + "\n"
-
-
-def _condensed_report(report: str) -> list[str]:
-    headers = ("case:", "url:", "package:", "merged_at:")
-    sections = {
-        "verdict hints:",
-        "failing checks:",
-        "base already incompatible:",
-        "base check truncated:",
-    }
-    kept: list[str] = []
-    section: str | None = None
-    for line in report.splitlines():
-        stripped = line.strip()
-        if not stripped:
-            continue
-        if line.startswith(headers):
-            kept.append(line)
-            section = None
-            continue
-        if line == "pypi:" or line == "workflows:" or line in sections:
-            section = line
-            kept.append(line)
-            continue
-        if line == _BASE_NO_FINDING or line.startswith("sibling PRs before"):
-            kept.append(line)
-            section = None
-            continue
-        pypi_line = line.startswith(("  old requires_python:", "  new requires_python:"))
-        if section == "pypi" and pypi_line:
-            kept.append(line)
-        elif section == "workflows" and "raw python-version scalars:" in line:
-            kept.append(line)
-        elif section in sections and line.startswith("  "):
-            kept.append(line)
-        elif line and not line.startswith(" "):
-            section = None
-    return kept
 
 
 def run_inspect_batch(
@@ -1208,8 +1276,9 @@ def run_inspect_batch(
     max_rate_limit_wait_s: float = 900.0,
     max_pypi_lookups: int = MAX_PYPI_LOOKUPS,
 ) -> Path:
-    """Write a condensed, read-only inspection report for selected cases."""
-    candidates = load_candidates(Path(directory) / "candidates.jsonl")
+    """Write a read-only inspection report for selected cases."""
+    directory = Path(directory)
+    candidates = load_candidates(directory / "candidates.jsonl")
     if case_ids is not None:
         unknown = [case_id for case_id in case_ids if case_id not in candidates]
         if unknown:
@@ -1231,20 +1300,23 @@ def run_inspect_batch(
     for case_id in selected:
         output.extend([f"=== {case_id} ==="])
         try:
-            report = inspect_case(
-                case_id,
-                dir=Path(directory),
-                client=active_client,
+            lines = _render_case_report(
+                candidates[case_id],
+                dir=directory,
+                also_dirs=None,
+                active_client=active_client,
                 pypi_fetch=pypi_fetch,
+                cache=cache,
                 max_pypi_lookups=max_pypi_lookups,
-                pypi_cache=cache,
+                include_lockfile_diff=False,
+                include_workflow_runs=False,
             )
         except GitHubFatalError:
             raise
         except (GitHubError, OSError, ValueError, KeyError, TypeError) as exc:
             output.append(f"error: {type(exc).__name__}: {redact(str(exc))}")
         else:
-            output.extend(_condensed_report(report))
+            output.extend(redact(line) for line in lines)
         output.append("")
     destination = Path(out)
     destination.parent.mkdir(parents=True, exist_ok=True)
