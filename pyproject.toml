@@ -32,7 +32,11 @@ build-backend = "uv_build"
 line-length = 100
 target-version = "py311"
 src = ["src", "tests"]
-extend-exclude = ["tests/fixtures/usage_repo"]
+extend-exclude = [
+    "tests/fixtures/usage_repo",
+    "bench/v0-candidates",
+    "bench/v0-failures",
+]
 
 [tool.ruff.lint]
 select = ["E", "F", "I"]

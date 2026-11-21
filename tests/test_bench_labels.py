@@ -327,6 +327,49 @@ def test_requested_cases_dropped_are_reported(tmp_path: Path) -> None:
     assert "acme/widgets#3 (already labeled this round)" in text
 
 
+def test_shorthand_resolves_and_only_dropped_id_is_reported(tmp_path: Path) -> None:
+    candidates = [
+        _candidate("acme/widgets#1", pr_number=1),
+        _candidate("acme/widgets#2", pr_number=2),
+        _candidate("acme/widgets#3", pr_number=3),
+    ]
+    directory = _setup(tmp_path, candidates, [_label("acme/widgets#3", 1, "OK")])
+    output, _ = _run_loop(
+        directory,
+        ["b", "api_break", "log_names_package", "evidence", "", ""],
+        requested_ids=["widgets#1", "acme/widgets#3"],
+    )
+    text = _text(output)
+    assert "requested cases dropped: acme/widgets#3 (already labeled this round)" in text
+    assert "widgets#1 (" not in text
+    stored = load_labels(directory / "labels.jsonl")
+    assert stored[("acme/widgets#1", 1)].label == "BROKE"
+
+
+def test_undo_skipped_when_another_session_changed_label(tmp_path: Path) -> None:
+    directory = _setup(
+        tmp_path, [_candidate("acme/widgets#1"), _candidate("acme/widgets#2", pr_number=2)]
+    )
+    labels_path = directory / "labels.jsonl"
+    script = ScriptedInput(["b", "api_break", "log_names_package", "evidence", "", "", "u", "q"])
+    choice_prompts = 0
+
+    def input_fn(prompt: str) -> str:
+        nonlocal choice_prompts
+        if prompt.startswith("[b]roke"):
+            choice_prompts += 1
+            if choice_prompts == 2:
+                save_label(labels_path, _label("acme/widgets#1", 1, "OK"))
+        return script(prompt)
+
+    output, collect = _collector()
+    run_label_loop(directory, input_fn=input_fn, output=collect, today=lambda: FIXED)
+    text = _text(output)
+    assert "undo skipped: acme/widgets#1 was changed by another session; store left as is" in text
+    assert "undid label for" not in text
+    assert load_labels(labels_path)[("acme/widgets#1", 1)].label == "OK"
+
+
 def test_exclude_flow(tmp_path: Path) -> None:
     directory = _setup(tmp_path, [_candidate()])
     _run_loop(

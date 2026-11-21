@@ -542,6 +542,11 @@ def bench_label_stats(
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=2) from exc
     stats = compute_stats(candidates, labels)
+    total = sum(sum(counts.values()) for counts in stats["rounds"].values())
+    detail = ", ".join(
+        f"round {number}: {sum(counts.values())}" for number, counts in stats["rounds"].items()
+    )
+    typer.echo(f"labeled cases: {total} ({detail})")
     for number, counts in stats["rounds"].items():
         typer.echo(
             f"round {number}: " + " ".join(f"{name}={count}" for name, count in counts.items())

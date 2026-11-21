@@ -162,8 +162,8 @@ def write_labels(path: Path, labels: Iterable[Label]) -> None:
 def save_label(
     path: Path, label: Label, records: dict[tuple[str, int], Label] | None = None
 ) -> tuple[dict[tuple[str, int], Label], Label | None]:
-    """Upsert one label and return the store plus the record it replaced."""
-    current = dict(records) if records is not None else load_labels(path)
+    """Upsert one label against the current store; return what was written."""
+    current = load_labels(path)
     key = (label.case_id, label.round)
     previous = current.get(key)
     current[key] = label
@@ -176,14 +176,18 @@ def undo_label(
     records: dict[tuple[str, int], Label],
     key: tuple[str, int],
     previous: Label | None,
-) -> dict[tuple[str, int], Label]:
-    """Undo a save, restoring the replaced record when there was one."""
+    expected: Label | None = None,
+) -> tuple[dict[tuple[str, int], Label], bool]:
+    """Undo a save against the current store; report whether it was applied."""
+    current = load_labels(path)
+    if expected is not None and current.get(key) != expected:
+        return current, False
     if previous is None:
-        records.pop(key, None)
+        current.pop(key, None)
     else:
-        records[key] = previous
-    write_labels(path, records.values())
-    return records
+        current[key] = previous
+    write_labels(path, current.values())
+    return current, True
 
 
 def load_candidates(path: Path) -> dict[str, dict[str, Any]]:
@@ -200,6 +204,28 @@ def load_candidates(path: Path) -> dict[str, dict[str, Any]]:
         if isinstance(record, dict) and isinstance(record.get("case_id"), str):
             candidates[record["case_id"]] = record
     return candidates
+
+
+def resolve_case_ids(candidates: dict[str, Any], requested_ids: list[str] | None) -> list[str]:
+    """Resolve exact ids or unique ``repo#N`` shorthands to full case ids."""
+    if requested_ids is None:
+        return []
+    resolved: list[str] = []
+    for case_id in requested_ids:
+        if case_id in candidates:
+            full_id = case_id
+        else:
+            matches = sorted(
+                candidate_id for candidate_id in candidates if candidate_id.endswith("/" + case_id)
+            )
+            if not matches:
+                raise ValueError("candidate not found: " + case_id)
+            if len(matches) > 1:
+                raise ValueError(f"ambiguous case id {case_id!r}: " + ", ".join(matches))
+            full_id = matches[0]
+        if full_id not in resolved:
+            resolved.append(full_id)
+    return resolved
 
 
 def collect_also_labeled(dirs: list[Path] | None, round: int) -> set[str]:
@@ -229,10 +255,7 @@ def select_cases(
     requested_ids: list[str] | None = None,
 ) -> list[str]:
     """Choose the unlabeled case_ids for a round, deterministically sorted."""
-    if requested_ids is not None:
-        unknown = [case_id for case_id in requested_ids if case_id not in candidates]
-        if unknown:
-            raise ValueError("candidate not found: " + ", ".join(unknown))
+    resolved_ids = resolve_case_ids(candidates, requested_ids)
     if round < 1:
         raise ValueError("round must be one or greater")
     if round1_label is not None and round < 2:
@@ -258,7 +281,7 @@ def select_cases(
             case_id for case_id in case_ids if candidates[case_id].get("label_suggestion") == only
         }
     if requested_ids is not None:
-        case_ids &= set(requested_ids)
+        case_ids &= set(resolved_ids)
     ordered = sorted(case_ids)
     if sample is not None and requested_ids is None and ordered:
         count = max(1, int(sample * len(ordered) + 0.5))
@@ -448,6 +471,7 @@ def run_label_loop(
     labels_path = directory / "labels.jsonl"
     labels = load_labels(labels_path)
     also_labeled = collect_also_labeled(also_dirs, round)
+    resolved_ids = resolve_case_ids(candidates, requested_ids)
     case_ids = select_cases(
         candidates,
         labels,
@@ -457,12 +481,12 @@ def run_label_loop(
         seed=seed,
         also_labeled=also_labeled,
         round1_label=round1_label,
-        requested_ids=requested_ids,
+        requested_ids=resolved_ids if requested_ids is not None else None,
     )
     output(f"labeling round {round}: {len(case_ids)} case(s)")
     if requested_ids is not None:
         dropped: list[str] = []
-        for case_id in dict.fromkeys(requested_ids):
+        for case_id in dict.fromkeys(resolved_ids):
             if case_id in case_ids:
                 continue
             reason = "not selected for this round"
@@ -474,7 +498,7 @@ def run_label_loop(
                 reason = "dropped by --also-dir"
             dropped.append(f"{case_id} ({reason})")
         output(f"requested cases dropped: {', '.join(dropped) if dropped else 'none'}")
-    saved: list[tuple[tuple[str, int], Label | None]] = []
+    saved: list[tuple[tuple[str, int], Label | None, Label]] = []
     skipped_ids: list[str] = []
     labeled = skipped = undone = 0
 
@@ -504,10 +528,18 @@ def run_label_loop(
                     if not saved:
                         output("nothing to undo in this session")
                         continue
-                    key, previous = saved.pop()
-                    labels = undo_label(labels_path, labels, key, previous)
-                    undone += 1
-                    output(f"undid label for {key[0]}")
+                    key, previous, saved_label = saved.pop()
+                    labels, applied = undo_label(
+                        labels_path, labels, key, previous, expected=saved_label
+                    )
+                    if applied:
+                        undone += 1
+                        output(f"undid label for {key[0]}")
+                    else:
+                        output(
+                            f"undo skipped: {key[0]} was changed by another session; "
+                            "store left as is"
+                        )
                     continue
 
                 label = _build_label(
@@ -529,7 +561,7 @@ def run_label_loop(
                 continue
             key = (label.case_id, label.round)
             labels, previous = save_label(labels_path, label, labels)
-            saved.append((key, previous))
+            saved.append((key, previous, label))
             labeled += 1
             output(f"saved {label.label} for {case_id}")
     except KeyboardInterrupt:
