@@ -1,0 +1,29 @@
+{
+  "kept": 15,
+  "excluded": 245,
+  "distinct_repos": 15,
+  "labels": {
+    "BROKE_SUSPECT": 9,
+    "UNCLEAR": 6
+  },
+  "reasons": {
+    "ci_not_attributable": 3,
+    "closed_without_ci_signal": 35,
+    "group_bump": 15,
+    "no_supported_lockfile": 53,
+    "not_single_package": 118,
+    "other": 1,
+    "parse_mismatch": 20
+  },
+  "bots": {
+    "dependabot": 13,
+    "renovate": 2
+  },
+  "splits": {
+    "dev": 8,
+    "test": 7
+  },
+  "api_calls": 550,
+  "cache_hits": 11,
+  "search_calls": 3
+}

@@ -279,8 +279,52 @@ def test_undo_deletes_new_label_and_handles_empty_stack(tmp_path: Path) -> None:
 def test_skip_and_quit_write_nothing(tmp_path: Path) -> None:
     directory = _setup(tmp_path, [_candidate()])
     output, _ = _run_loop(directory, ["s", "q"])
-    assert "session: 0 label(s) saved, 1 skipped" in _text(output)
+    text = _text(output)
+    assert "session: 0 label(s) saved, 1 skipped" in text
+    assert "skipped case_ids: acme/widgets#1" in text
     assert not (directory / "labels.jsonl").exists()
+
+
+def test_requested_case_filter_shows_only_requested_cases(tmp_path: Path) -> None:
+    candidates = [
+        _candidate("acme/widgets#1", pr_number=1),
+        _candidate("acme/widgets#2", pr_number=2),
+        _candidate("acme/widgets#3", pr_number=3),
+    ]
+    directory = _setup(tmp_path, candidates)
+    output, _ = _run_loop(
+        directory,
+        ["s", "s"],
+        requested_ids=["acme/widgets#2", "acme/widgets#3"],
+    )
+    text = _text(output)
+    assert "/pull/2" in text and "/pull/3" in text
+    assert "/pull/1" not in text
+    assert "requested cases dropped: none" in text
+
+
+def test_requested_case_unknown_raises_clear_error(tmp_path: Path) -> None:
+    directory = _setup(tmp_path, [_candidate()])
+    with pytest.raises(ValueError, match="candidate not found: acme/widgets#99"):
+        _run_loop(directory, ["q"], requested_ids=["acme/widgets#99"])
+
+
+def test_requested_cases_dropped_are_reported(tmp_path: Path) -> None:
+    candidates = [
+        _candidate("acme/widgets#1", pr_number=1, label_suggestion="OK_SUSPECT"),
+        _candidate("acme/widgets#2", pr_number=2, label_suggestion="BROKE_SUSPECT"),
+        _candidate("acme/widgets#3", pr_number=3, label_suggestion="OK_SUSPECT"),
+    ]
+    directory = _setup(tmp_path, candidates, [_label("acme/widgets#3", 1, "OK")])
+    output, _ = _run_loop(
+        directory,
+        ["q"],
+        only="OK_SUSPECT",
+        requested_ids=["acme/widgets#1", "acme/widgets#2", "acme/widgets#3"],
+    )
+    text = _text(output)
+    assert "acme/widgets#2 (dropped by --only OK_SUSPECT)" in text
+    assert "acme/widgets#3 (already labeled this round)" in text
 
 
 def test_exclude_flow(tmp_path: Path) -> None:

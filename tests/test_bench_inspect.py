@@ -10,7 +10,7 @@ import pytest
 from typer.testing import CliRunner
 
 from bumpcheck.bench.github import GitHubClient, HttpStatusError
-from bumpcheck.bench.inspect_case import PYPI_JSON_URL, inspect_case
+from bumpcheck.bench.inspect_case import PYPI_JSON_URL, inspect_case, run_inspect_batch
 from bumpcheck.cli import app
 
 FIXTURE = Path(__file__).parent / "fixtures" / "workflows" / "pylint.yml"
@@ -19,6 +19,7 @@ API = "https://api.github.com"
 RAW = "https://raw.githubusercontent.com/acme/widgets"
 REPO = "acme/widgets"
 PR_URL = f"{API}/repos/{REPO}/pulls/1"
+BASE_COMMIT_URL = f"{API}/repos/{REPO}/commits/base-sha"
 WORKFLOWS_URL = f"{API}/repos/{REPO}/contents/.github/workflows?ref=head-sha"
 WORKFLOW_URL = f"{API}/repos/{REPO}/contents/.github/workflows/pylint.yml?ref=head-sha"
 PYPROJECT_URL = f"{RAW}/head-sha/pyproject.toml"
@@ -54,8 +55,8 @@ def _setup(tmp_path: Path, *candidates: dict[str, Any], name: str = "store") -> 
     return directory
 
 
-def _pypi_url(version: str) -> str:
-    return PYPI_JSON_URL.format(name="requests", version=version)
+def _pypi_url(version: str, name: str = "requests") -> str:
+    return PYPI_JSON_URL.format(name=name, version=version)
 
 
 def _pypi_bytes(
@@ -63,10 +64,19 @@ def _pypi_bytes(
     requires_python: str | None,
     requires_dist: list[str] | None = None,
 ) -> bytes:
+    return _pypi_bytes_for("requests", version, requires_python, requires_dist)
+
+
+def _pypi_bytes_for(
+    name: str,
+    version: str,
+    requires_python: str | None,
+    requires_dist: list[str] | None = None,
+) -> bytes:
     return json.dumps(
         {
             "info": {
-                "name": "requests",
+                "name": name,
                 "version": version,
                 "requires_python": requires_python,
                 "requires_dist": requires_dist,
@@ -96,6 +106,9 @@ def _workflow_json(workflow_text: str) -> dict[str, Any]:
         },
         WORKFLOWS_URL: [{"type": "file", "name": "pylint.yml", "url": WORKFLOW_URL}],
         WORKFLOW_URL: {"content": content},
+        BASE_COMMIT_URL: {
+            "commit": {"committer": {"date": "2026-01-05T09:00:00Z"}},
+        },
     }
 
 
@@ -164,8 +177,10 @@ def _inspect(
     bytes_responses: dict[str, bytes] | None = None,
     pypi: dict[str, bytes | BaseException] | None = None,
     also_dirs: list[Path] | None = None,
+    max_pypi_lookups: int = 0,
+    extra_candidates: list[dict[str, Any]] | None = None,
 ) -> str:
-    directory = _setup(tmp_path, candidate)
+    directory = _setup(tmp_path, candidate, *(extra_candidates or []))
     if json_responses is None or bytes_responses is None:
         default_json, default_bytes = _responses()
         json_responses = default_json if json_responses is None else json_responses
@@ -177,6 +192,7 @@ def _inspect(
         also_dirs=also_dirs,
         client=client,  # type: ignore[arg-type]
         pypi_fetch=_pypi_fetch(pypi if pypi is not None else _default_pypi()),
+        max_pypi_lookups=max_pypi_lookups,
     )
 
 
@@ -207,6 +223,7 @@ def test_workflow_matrix_and_run_lines_from_fixture(tmp_path: Path) -> None:
     assert "on: pull_request, push" in report
     assert "name: Pylint" in report
     assert "python-version matrix: 3.8, 3.9, 3.10" in report
+    assert 'raw python-version scalars: "3.8", "3.9", "3.10"' in report
     assert "- pip install -r requirements.txt" in report
     assert "- uv pip install pylint ruff" in report
     assert "- pylint src tests" in report
@@ -274,6 +291,7 @@ def test_offline_cache_replay_makes_no_network_calls(tmp_path: Path) -> None:
         "acme/widgets#1",
         dir=directory,
         client=GitHubClient(cache_dir=cache_dir, offline=True, transport=fail_transport),
+        max_pypi_lookups=0,
     )
     assert calls == []
     assert "case: acme/widgets#1" in report
@@ -338,8 +356,137 @@ def test_also_dir_falls_back_when_primary_misses(tmp_path: Path) -> None:
         also_dirs=[fallback],
         client=client,  # type: ignore[arg-type]
         pypi_fetch=_pypi_fetch(_default_pypi()),
+        max_pypi_lookups=0,
     )
     assert "case: acme/widgets#1" in report
+
+
+def test_raw_python_version_scalars_show_quotes(tmp_path: Path) -> None:
+    report = _inspect(tmp_path, _candidate())
+    assert 'raw python-version scalars: "3.8", "3.9", "3.10"' in report
+
+
+def test_base_contamination_hint_reports_incompatible_pin(tmp_path: Path) -> None:
+    old_lock = "requests==2.31.0\nunrelated==1.0.0\n"
+    json_responses, bytes_responses = _responses(old_lock=old_lock)
+    pypi = _default_pypi()
+    pypi[_pypi_url("1.0.0", "unrelated")] = _pypi_bytes_for("unrelated", "1.0.0", ">=3.10")
+    candidate = _candidate(ci_checks=[{"name": "Pylint (3.9)", "conclusion": "failure"}])
+    report = _inspect(
+        tmp_path,
+        candidate,
+        json_responses=json_responses,
+        bytes_responses=bytes_responses,
+        pypi=pypi,
+        max_pypi_lookups=40,
+    )
+    assert "base already incompatible:" in report
+    assert "unrelated==1.0.0 requires_python >=3.10 excludes Python 3.9" in report
+
+
+def test_base_contamination_no_finding_uses_exact_message(tmp_path: Path) -> None:
+    json_responses, bytes_responses = _responses(old_lock="requests==2.31.0\n")
+    candidate = _candidate(ci_checks=[{"name": "Pylint (3.9)", "conclusion": "failure"}])
+    report = _inspect(
+        tmp_path,
+        candidate,
+        json_responses=json_responses,
+        bytes_responses=bytes_responses,
+        max_pypi_lookups=40,
+    )
+    assert (
+        "base already incompatible: none found (hint only; does not show the base was green)"
+    ) in report
+
+
+def test_base_contamination_truncates_pin_lookups(tmp_path: Path) -> None:
+    old_lock = "alpha==1.0.0\nbeta==1.0.0\ngamma==1.0.0\n"
+    json_responses, bytes_responses = _responses(old_lock=old_lock)
+    pypi = _default_pypi()
+    pypi[_pypi_url("1.0.0", "alpha")] = _pypi_bytes_for("alpha", "1.0.0", None)
+    report = _inspect(
+        tmp_path,
+        _candidate(),
+        json_responses=json_responses,
+        bytes_responses=bytes_responses,
+        pypi=pypi,
+        max_pypi_lookups=1,
+    )
+    assert "base check truncated: 1 of 3 pins checked" in report
+
+
+def test_base_contamination_matrix_versions_and_non_concrete(tmp_path: Path) -> None:
+    old_lock = "requests==2.31.0\nunrelated==1.0.0\n"
+    json_responses, bytes_responses = _responses(old_lock=old_lock)
+    pypi = _default_pypi()
+    pypi[_pypi_url("1.0.0", "unrelated")] = _pypi_bytes_for("unrelated", "1.0.0", ">=3.11")
+    candidate = _candidate(ci_checks=[{"name": "CI (3.x)", "conclusion": "failure"}])
+    report = _inspect(
+        tmp_path,
+        candidate,
+        json_responses=json_responses,
+        bytes_responses=bytes_responses,
+        pypi=pypi,
+        max_pypi_lookups=40,
+    )
+    assert "(matrix versions)" in report
+    assert "non-concrete: 3.x" in report
+
+
+def test_sibling_pr_lines_use_two_windows(tmp_path: Path) -> None:
+    sibling = _candidate(
+        case_id="acme/widgets#2",
+        pr_number=2,
+        merged_at="2026-01-05T08:30:00Z",
+    )
+    report = _inspect(tmp_path, _candidate(), extra_candidates=[sibling])
+    assert "sibling PRs before base (hint only): acme/widgets#2 (2026-01-05T08:30:00Z)" in report
+    assert (
+        "sibling PRs before merged_at (hint only): acme/widgets#2 (2026-01-05T08:30:00Z)"
+    ) in report
+
+
+def test_inspect_batch_condenses_and_caches_pypi(tmp_path: Path) -> None:
+    first = _candidate(label_suggestion="BROKE_SUSPECT")
+    second = _candidate(
+        case_id="acme/widgets#2",
+        pr_number=2,
+        label_suggestion="OK_SUSPECT",
+    )
+    directory = _setup(tmp_path, first, second)
+    json_responses, bytes_responses = _responses(old_lock="unrelated==1.0.0\n")
+    json_responses[f"{API}/repos/{REPO}/pulls/2"] = {
+        "base": {"full_name": REPO},
+        "head": {"full_name": REPO},
+    }
+    pypi = _default_pypi()
+    pypi[_pypi_url("1.0.0", "unrelated")] = _pypi_bytes_for("unrelated", "1.0.0", ">=3.10")
+    calls: dict[str, int] = {}
+
+    def counted_fetch(url: str) -> bytes:
+        calls[url] = calls.get(url, 0) + 1
+        if url not in pypi:
+            raise AssertionError(f"Unexpected PyPI URL: {url}")
+        value = pypi[url]
+        if isinstance(value, BaseException):
+            raise value
+        return value
+
+    out = tmp_path / "report.txt"
+    run_inspect_batch(
+        directory,
+        out=out,
+        client=FakeGitHub(json_responses, bytes_responses),  # type: ignore[arg-type]
+        pypi_fetch=counted_fetch,
+        max_pypi_lookups=40,
+    )
+    text = out.read_text(encoding="utf-8")
+    assert "=== acme/widgets#1 ===" in text
+    assert "=== acme/widgets#2 ===" in text
+    assert "case: acme/widgets#2" in text
+    assert "label_suggestion" not in text
+    assert "BROKE_SUSPECT" not in text
+    assert calls[_pypi_url("1.0.0", "unrelated")] == 1
 
 
 def test_cli_inspect_missing_case_exits_two(tmp_path: Path) -> None:
@@ -356,13 +503,92 @@ def test_cli_inspect_missing_case_exits_two(tmp_path: Path) -> None:
 def test_cli_inspect_prints_report(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import bumpcheck.cli as cli_module
 
-    monkeypatch.setattr(cli_module, "run_inspect", lambda *args, **kwargs: "report\n")
+    captured: dict[str, object] = {}
+
+    def fake_inspect(*args: object, **kwargs: object) -> str:
+        captured.update(kwargs)
+        return "report\n"
+
+    monkeypatch.setattr(cli_module, "run_inspect", fake_inspect)
     result = CliRunner().invoke(
         app,
-        ["bench", "inspect", "a/b#1", "--dir", str(tmp_path), "--allow-unauthenticated"],
+        [
+            "bench",
+            "inspect",
+            "a/b#1",
+            "--dir",
+            str(tmp_path),
+            "--max-pypi-lookups",
+            "7",
+            "--allow-unauthenticated",
+        ],
     )
     assert result.exit_code == 0
     assert "report" in result.output
+    assert captured["max_pypi_lookups"] == 7
+
+
+def test_cli_inspect_batch_writes_report(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import bumpcheck.cli as cli_module
+
+    captured: dict[str, object] = {}
+
+    def fake_batch(directory: Path, **kwargs: object) -> Path:
+        captured["directory"] = directory
+        captured.update(kwargs)
+        return tmp_path / "report.txt"
+
+    monkeypatch.setattr(cli_module, "run_inspect_batch", fake_batch)
+    result = CliRunner().invoke(
+        app,
+        [
+            "bench",
+            "inspect-batch",
+            "--dir",
+            str(tmp_path),
+            "--out",
+            str(tmp_path / "report.txt"),
+            "--case",
+            "a/b#1",
+            "--only",
+            "BROKE_SUSPECT",
+            "--max-pypi-lookups",
+            "7",
+            "--allow-unauthenticated",
+        ],
+    )
+    assert result.exit_code == 0
+    assert "wrote" in result.output
+    assert captured["only"] == "BROKE_SUSPECT"
+    assert captured["case_ids"] == ["a/b#1"]
+    assert captured["max_pypi_lookups"] == 7
+
+
+def test_cli_inspect_batch_unknown_case_exits_two(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import bumpcheck.cli as cli_module
+
+    def fail_batch(*args: object, **kwargs: object) -> Path:
+        raise ValueError("candidate not found: a/b#99")
+
+    monkeypatch.setattr(cli_module, "run_inspect_batch", fail_batch)
+    result = CliRunner().invoke(
+        app,
+        [
+            "bench",
+            "inspect-batch",
+            "--dir",
+            str(tmp_path),
+            "--out",
+            str(tmp_path / "report.txt"),
+            "--case",
+            "a/b#99",
+            "--allow-unauthenticated",
+        ],
+    )
+    assert result.exit_code == 2
+    assert "candidate not found: a/b#99" in result.output
 
 
 def test_unquoted_python_matrix_regression(tmp_path: Path) -> None:

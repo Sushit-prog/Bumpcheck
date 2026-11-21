@@ -1,0 +1,75 @@
+{
+  "candidate": {
+    "base_sha": "9a19ad9073047df1c24323fa92820b8977055dff",
+    "head_sha": "b9d578d29815122da829353773c0e9e54fef4b95",
+    "lockfile_kind": "requirements",
+    "lockfile_paths": [
+      "requirements.txt"
+    ],
+    "new_version": "4.44.0",
+    "old_version": "4.25.0",
+    "package": "selenium",
+    "pr_number": 49,
+    "repo": "Apocrathia/NSL-Downloader"
+  },
+  "case_id": "Apocrathia/NSL-Downloader#49",
+  "lockfiles": {
+    "requirements.txt": {
+      "new": "new/lockfile-0.txt",
+      "old": "old/lockfile-0.txt"
+    }
+  },
+  "new": {
+    "extraction": {
+      "bytes_extracted": 4882857,
+      "bytes_skipped": 0,
+      "files_extracted": 308,
+      "files_skipped": 0,
+      "skip_reasons": {},
+      "skipped": []
+    },
+    "metadata_file": "new/metadata.json",
+    "metadata_url": "https://pypi.org/pypi/selenium/4.44.0/json",
+    "sha256": "d01ea3e5ecad8149460a765f7cf5177194c21dcc0173093fc05427c289b1bf24",
+    "version": "4.44.0",
+    "wheel_file": "new/selenium-4.44.0-py3-none-any.whl",
+    "wheel_filename": "selenium-4.44.0-py3-none-any.whl",
+    "wheel_url": "https://files.pythonhosted.org/packages/1f/bc/885047e975e996cb317db31c4551caa915aafc6befea990f082c7233adc2/selenium-4.44.0-py3-none-any.whl"
+  },
+  "old": {
+    "extraction": {
+      "bytes_extracted": 4745214,
+      "bytes_skipped": 0,
+      "files_extracted": 320,
+      "files_skipped": 0,
+      "skip_reasons": {},
+      "skipped": []
+    },
+    "metadata_file": "old/metadata.json",
+    "metadata_url": "https://pypi.org/pypi/selenium/4.25.0/json",
+    "sha256": "3798d2d12b4a570bc5790163ba57fef10b2afee958bf1d80f2a3cf07c4141f33",
+    "version": "4.25.0",
+    "wheel_file": "old/selenium-4.25.0-py3-none-any.whl",
+    "wheel_filename": "selenium-4.25.0-py3-none-any.whl",
+    "wheel_url": "https://files.pythonhosted.org/packages/aa/85/fa44f23dd5d5066a72f7c4304cce4b5ff9a6e7fd92431a48b2c63fbf63ec/selenium-4.25.0-py3-none-any.whl"
+  },
+  "repo": {
+    "extraction": {
+      "bytes_extracted": 3295,
+      "bytes_skipped": 0,
+      "files_extracted": 3,
+      "files_skipped": 0,
+      "skip_reasons": {},
+      "skipped": []
+    },
+    "sha": "9a19ad9073047df1c24323fa92820b8977055dff",
+    "url": "https://api.github.com/repos/Apocrathia/NSL-Downloader/tarball/9a19ad9073047df1c24323fa92820b8977055dff"
+  },
+  "skipped": {
+    "bytes": 0,
+    "files": 0,
+    "reasons": {}
+  },
+  "slug": "Apocrathia__NSL-Downloader__49",
+  "status": "complete"
+}

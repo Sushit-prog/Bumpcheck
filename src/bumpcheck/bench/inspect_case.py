@@ -10,6 +10,7 @@ import tomllib
 import urllib.parse
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal
 
@@ -27,6 +28,7 @@ from bumpcheck.bench.github import (
 )
 from bumpcheck.bench.labels import load_candidates
 from bumpcheck.bench.mine import FAILURE_CONCLUSIONS
+from bumpcheck.lockdiff import SUPPORTED_KINDS, LockParseError, extract_pinned_versions
 from bumpcheck.pycompat import (
     ConcretePythonVersion,
     NonConcretePythonVersion,
@@ -45,6 +47,7 @@ _URL_QUERY_RE = re.compile(r"(https?://[^\s?#]+)\?[^\s]*")
 _CREDENTIAL_RE = re.compile(r"(https?://)[^/\s:@]+:[^/\s@]+@")
 _MATRIX_EXPRESSION_RE = re.compile(r"\$\{\{\s*matrix\.([A-Za-z0-9_-]+)\s*\}\}")
 _PLAIN_FLOAT_RE = re.compile(r"(\d+)\.(\d+)")
+_VERSION_NAME_RE = re.compile(r"(?<![\d.])(\d+(?:\.(?:\d+|[xX*])){1,2})(?![\d.])")
 _VERSION_KEYS = frozenset({"python-version", "python-version-file"})
 
 
@@ -82,6 +85,13 @@ class DependencyChanges:
     added: tuple[str, ...]
     removed: tuple[str, ...]
     changed: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...]
+
+
+PypiCache = dict[tuple[str, str], PypiInfo | None]
+MAX_PYPI_LOOKUPS = 40
+_BASE_NO_FINDING = (
+    "base already incompatible: none found (hint only; does not show the base was green)"
+)
 
 
 def redact(text: str) -> str:
@@ -164,9 +174,13 @@ def _fetch_pypi(
     name: str,
     version: str | None,
     pypi_fetch: Callable[[str], bytes] | None = None,
+    cache: PypiCache | None = None,
 ) -> PypiInfo | None:
     if not name or not version:
         return None
+    key = (canonicalize_name(name), version)
+    if cache is not None and key in cache:
+        return cache[key]
     url = _pypi_url(name, version)
     fetch = pypi_fetch if pypi_fetch is not None else client.get_external_bytes
     try:
@@ -175,27 +189,30 @@ def _fetch_pypi(
     except GitHubFatalError:
         raise
     except (GitHubError, OSError, ValueError, UnicodeDecodeError):
-        return None
-    if not isinstance(payload, dict):
-        return None
-    info = payload.get("info")
-    if not isinstance(info, dict):
-        return None
-    requires_python = info.get("requires_python")
-    if not isinstance(requires_python, str) or not requires_python.strip():
-        requires_python = None
-    raw_dist = info.get("requires_dist")
-    requires_dist = (
-        tuple(item for item in raw_dist if isinstance(item, str))
-        if isinstance(raw_dist, list)
-        else ()
-    )
-    fetched_version = info.get("version")
-    return PypiInfo(
-        version=fetched_version if isinstance(fetched_version, str) else version,
-        requires_python=requires_python,
-        requires_dist=requires_dist,
-    )
+        result = None
+    else:
+        info = payload.get("info") if isinstance(payload, dict) else None
+        if not isinstance(info, dict):
+            result = None
+        else:
+            requires_python = info.get("requires_python")
+            if not isinstance(requires_python, str) or not requires_python.strip():
+                requires_python = None
+            raw_dist = info.get("requires_dist")
+            requires_dist = (
+                tuple(item for item in raw_dist if isinstance(item, str))
+                if isinstance(raw_dist, list)
+                else ()
+            )
+            fetched_version = info.get("version")
+            result = PypiInfo(
+                version=fetched_version if isinstance(fetched_version, str) else version,
+                requires_python=requires_python,
+                requires_dist=requires_dist,
+            )
+    if cache is not None:
+        cache[key] = result
+    return result
 
 
 def _requirement_index(lines: tuple[str, ...]) -> dict[str, dict[str, str]]:
@@ -672,6 +689,14 @@ def _unquoted_float_warning(scalar: VersionScalar) -> str | None:
     return f"(unquoted: Actions reads this as {major}.{as_float_minor})"
 
 
+def _scalar_text(scalar: VersionScalar) -> str:
+    if scalar.style == '"':
+        return f'"{scalar.raw}"'
+    if scalar.style == "'":
+        return f"'{scalar.raw}'"
+    return scalar.raw
+
+
 def _format_version_scalar(scalar: VersionScalar) -> str:
     result = interpret_python_version(scalar.raw, source=scalar.source)
     if isinstance(result, NonConcretePythonVersion):
@@ -706,6 +731,12 @@ def _workflow_lines(files: list[WorkflowFile], failures: list[str], listing_ok: 
                 else "none"
             )
             lines.append(f"        python-version matrix: {versions}")
+            raw = (
+                ", ".join(_scalar_text(scalar) for scalar in job.python_versions)
+                if job.python_versions
+                else "none"
+            )
+            lines.append(f"        raw python-version scalars: {raw}")
             lines.append("        run:")
             if job.run_lines:
                 for run in job.run_lines:
@@ -832,6 +863,228 @@ def _failing_check_lines(candidate: dict[str, Any], workflows: list[WorkflowFile
     return lines
 
 
+def _failing_checks(candidate: dict[str, Any]) -> list[dict[str, Any]]:
+    checks = candidate.get("ci_checks")
+    return [
+        check
+        for check in checks or []
+        if isinstance(check, dict) and str(check.get("conclusion") or "") in FAILURE_CONCLUSIONS
+    ]
+
+
+def _failing_targets(
+    candidate: dict[str, Any], workflows: list[WorkflowFile]
+) -> tuple[dict[Version, str], list[str]]:
+    concrete: dict[Version, str] = {}
+    non_concrete: list[str] = []
+    for check in _failing_checks(candidate):
+        name = str(check.get("name") or "")
+        match = _VERSION_NAME_RE.search(name)
+        if match is None:
+            continue
+        raw = match.group(1)
+        result = interpret_python_version(raw, source="version")
+        if isinstance(result, NonConcretePythonVersion):
+            non_concrete.append(f"{raw} (non-concrete: {result.reason}; check {name})")
+        else:
+            concrete.setdefault(result.as_version(), name)
+
+    matrix: dict[Version, str] = {}
+    for workflow in workflows:
+        for job in workflow.jobs:
+            for scalar in job.python_versions:
+                result = interpret_python_version(scalar.raw, source=scalar.source)
+                if isinstance(result, NonConcretePythonVersion):
+                    non_concrete.append(
+                        f"{scalar.raw} (non-concrete: {result.reason}; {workflow.path})"
+                    )
+                else:
+                    matrix.setdefault(result.as_version(), "matrix versions")
+    if not concrete:
+        concrete = matrix
+    return concrete, list(dict.fromkeys(non_concrete))
+
+
+def _lockfile_kind(candidate: dict[str, Any], path: str) -> str:
+    configured = candidate.get("lockfile_kind")
+    if isinstance(configured, str) and configured in SUPPORTED_KINDS:
+        return configured
+    if path.endswith("uv.lock"):
+        return "uv.lock"
+    if path.endswith("poetry.lock"):
+        return "poetry.lock"
+    return "requirements"
+
+
+def _base_pins(
+    client: GitHubClient,
+    candidate: dict[str, Any],
+    base_repo: str,
+) -> tuple[list[tuple[str, str]], list[str]]:
+    pins: list[tuple[str, str]] = []
+    undetermined: list[str] = []
+    paths = candidate.get("lockfile_paths")
+    if not isinstance(paths, list) or not paths:
+        return pins, ["pins could not be determined"]
+    base_sha = str(candidate.get("base_sha") or "")
+    for path in paths:
+        if not isinstance(path, str) or not path:
+            continue
+        text = _fetch_raw(client, base_repo, path, base_sha)
+        if text is None:
+            undetermined.append(f"{path}: pins could not be determined")
+            continue
+        try:
+            parsed = extract_pinned_versions(text, _lockfile_kind(candidate, path))
+        except LockParseError:
+            undetermined.append(f"{path}: pins could not be determined")
+            continue
+        if not parsed:
+            undetermined.append(f"{path}: pins could not be determined")
+            continue
+        for name, versions in parsed.items():
+            for version in versions:
+                pins.append((name, version))
+    pins = sorted(set(pins))
+    return pins, undetermined
+
+
+def _base_contamination_lines(
+    client: GitHubClient,
+    candidate: dict[str, Any],
+    base_repo: str,
+    workflows: list[WorkflowFile],
+    pypi_fetch: Callable[[str], bytes] | None,
+    cache: PypiCache,
+    max_pypi_lookups: int,
+) -> list[str]:
+    targets, non_concrete = _failing_targets(candidate, workflows)
+    if not targets:
+        notices = [f"  non-concrete: {item}; not evaluated" for item in non_concrete]
+        return [_BASE_NO_FINDING, *notices]
+    pins, undetermined = _base_pins(client, candidate, base_repo)
+    notices: list[str] = list(undetermined)
+    if max_pypi_lookups < len(pins):
+        notices.insert(0, f"base check truncated: {max_pypi_lookups} of {len(pins)} pins checked")
+    checked = pins[:max_pypi_lookups]
+    findings: list[str] = []
+    for name, version in checked:
+        info = _fetch_pypi(client, name, version, pypi_fetch, cache)
+        if info is None or not info.requires_python:
+            continue
+        for target, label in sorted(targets.items()):
+            if allows_python(info.requires_python, target) is False:
+                findings.append(
+                    f"  {name}=={version} requires_python {info.requires_python} excludes "
+                    f"Python {target} ({label})"
+                )
+    for item in non_concrete:
+        notices.append(f"  non-concrete: {item}; not evaluated")
+    if not findings:
+        return [_BASE_NO_FINDING, *notices]
+    return ["base already incompatible:", *notices, *dict.fromkeys(findings)]
+
+
+def _parse_timestamp(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip().replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _commit_time(client: GitHubClient, repo: str, sha: str) -> datetime | None:
+    if not repo or not sha:
+        return None
+    url = f"{github.API_ROOT}/repos/{repo}/commits/{sha}"
+    try:
+        payload = client.get_json(url)
+        date = payload["commit"]["committer"]["date"]
+    except (GitHubError, OSError, ValueError, KeyError, TypeError):
+        return None
+    return _parse_timestamp(date)
+
+
+def _pr_merge_time(client: GitHubClient, repo: str, record: dict[str, Any]) -> datetime | None:
+    merged = _parse_timestamp(record.get("merged_at"))
+    if merged is not None:
+        return merged
+    number = record.get("pr_number")
+    if not repo or not isinstance(number, int) or isinstance(number, bool):
+        return None
+    url = f"{github.API_ROOT}/repos/{repo}/pulls/{number}"
+    try:
+        payload = client.get_json(url)
+    except (GitHubError, OSError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return _parse_timestamp(payload.get("merged_at"))
+
+
+def _sibling_records(directory: Path, also_dirs: list[Path] | None) -> dict[str, dict[str, Any]]:
+    records: dict[str, dict[str, Any]] = {}
+    for candidate_dir in (directory, *(also_dirs or ())):
+        for name in ("candidates.jsonl", "excluded.jsonl"):
+            path = candidate_dir / name
+            if not path.is_file():
+                continue
+            for case_id, record in load_candidates(path).items():
+                records.setdefault(case_id, record)
+    return records
+
+
+def _format_siblings(entries: list[dict[str, Any]]) -> str:
+    if not entries:
+        return "none"
+    parts = []
+    for entry in sorted(entries, key=lambda item: (str(item["time"]), str(item["case_id"]))):
+        merged = entry["time"].isoformat().replace("+00:00", "Z")
+        title = str(entry.get("title") or "")
+        suffix = f": {title}" if title else ""
+        parts.append(f"{entry['case_id']} ({merged}){suffix}")
+    return ", ".join(parts)
+
+
+def _sibling_pr_lines(
+    client: GitHubClient,
+    candidate: dict[str, Any],
+    *,
+    directory: Path,
+    also_dirs: list[Path] | None,
+) -> list[str]:
+    repo = str(candidate.get("repo") or "")
+    current_case = str(candidate.get("case_id") or "")
+    base_time = _commit_time(client, repo, str(candidate.get("base_sha") or ""))
+    merge_time = _parse_timestamp(candidate.get("merged_at"))
+    records = _sibling_records(directory, also_dirs)
+    before_base: list[dict[str, Any]] = []
+    before_merge: list[dict[str, Any]] = []
+    for case_id, record in records.items():
+        if case_id == current_case or str(record.get("repo") or "") != repo:
+            continue
+        merged = _pr_merge_time(client, repo, record)
+        if merged is None:
+            continue
+        entry = {"case_id": case_id, "time": merged, "title": record.get("title")}
+        for anchor, bucket in ((base_time, before_base), (merge_time, before_merge)):
+            if anchor is None:
+                continue
+            if anchor - timedelta(hours=24) <= merged <= anchor:
+                bucket.append(entry)
+    base_text = "unavailable" if base_time is None else _format_siblings(before_base)
+    merge_text = "unavailable" if merge_time is None else _format_siblings(before_merge)
+    return [
+        f"sibling PRs before base (hint only): {base_text}",
+        f"sibling PRs before merged_at (hint only): {merge_text}",
+    ]
+
+
 def inspect_case(
     case_id: str,
     *,
@@ -842,6 +1095,8 @@ def inspect_case(
     client: GitHubClient | None = None,
     pypi_fetch: Callable[[str], bytes] | None = None,
     max_rate_limit_wait_s: float = 900.0,
+    max_pypi_lookups: int = MAX_PYPI_LOOKUPS,
+    pypi_cache: PypiCache | None = None,
 ) -> str:
     """Render a read-only inspection report for one candidate."""
     candidate, _ = find_candidate(case_id, dir, also_dirs)
@@ -856,8 +1111,9 @@ def inspect_case(
     old_version = old_version if isinstance(old_version, str) else None
     new_version = new_version if isinstance(new_version, str) else None
 
-    old_info = _fetch_pypi(active_client, package, old_version, pypi_fetch)
-    new_info = _fetch_pypi(active_client, package, new_version, pypi_fetch)
+    cache = pypi_cache if pypi_cache is not None else {}
+    old_info = _fetch_pypi(active_client, package, old_version, pypi_fetch, cache)
+    new_info = _fetch_pypi(active_client, package, new_version, pypi_fetch, cache)
     base_repo, head_repo = _resolve_repos(active_client, candidate)
     head_sha = str(candidate.get("head_sha") or "")
     workflows, failures, listing_ok = _fetch_workflows(active_client, head_repo, head_sha)
@@ -879,4 +1135,120 @@ def inspect_case(
         )
     )
     lines.extend(_failing_check_lines(candidate, workflows))
+    lines.extend(
+        _base_contamination_lines(
+            active_client,
+            candidate,
+            base_repo,
+            workflows,
+            pypi_fetch,
+            cache,
+            max(0, max_pypi_lookups),
+        )
+    )
+    lines.extend(
+        _sibling_pr_lines(
+            active_client,
+            candidate,
+            directory=dir,
+            also_dirs=also_dirs,
+        )
+    )
     return "\n".join(redact(line) for line in lines) + "\n"
+
+
+def _condensed_report(report: str) -> list[str]:
+    headers = ("case:", "url:", "package:", "merged_at:")
+    sections = {
+        "verdict hints:",
+        "failing checks:",
+        "base already incompatible:",
+        "base check truncated:",
+    }
+    kept: list[str] = []
+    section: str | None = None
+    for line in report.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if line.startswith(headers):
+            kept.append(line)
+            section = None
+            continue
+        if line == "pypi:" or line == "workflows:" or line in sections:
+            section = line
+            kept.append(line)
+            continue
+        if line == _BASE_NO_FINDING or line.startswith("sibling PRs before"):
+            kept.append(line)
+            section = None
+            continue
+        pypi_line = line.startswith(("  old requires_python:", "  new requires_python:"))
+        if section == "pypi" and pypi_line:
+            kept.append(line)
+        elif section == "workflows" and "raw python-version scalars:" in line:
+            kept.append(line)
+        elif section in sections and line.startswith("  "):
+            kept.append(line)
+        elif line and not line.startswith(" "):
+            section = None
+    return kept
+
+
+def run_inspect_batch(
+    directory: Path,
+    *,
+    out: Path,
+    only: str | None = None,
+    case_ids: list[str] | None = None,
+    offline: bool = False,
+    cache_dir: Path | None = None,
+    client: GitHubClient | None = None,
+    pypi_fetch: Callable[[str], bytes] | None = None,
+    max_rate_limit_wait_s: float = 900.0,
+    max_pypi_lookups: int = MAX_PYPI_LOOKUPS,
+) -> Path:
+    """Write a condensed, read-only inspection report for selected cases."""
+    candidates = load_candidates(Path(directory) / "candidates.jsonl")
+    if case_ids is not None:
+        unknown = [case_id for case_id in case_ids if case_id not in candidates]
+        if unknown:
+            raise ValueError("candidate not found: " + ", ".join(unknown))
+    selected = sorted(candidates)
+    if case_ids is not None:
+        selected = [case_id for case_id in selected if case_id in set(case_ids)]
+    if only is not None:
+        selected = [
+            case_id for case_id in selected if candidates[case_id].get("label_suggestion") == only
+        ]
+    active_client = client or GitHubClient(
+        cache_dir=cache_dir,
+        offline=offline,
+        max_rate_limit_wait_s=max_rate_limit_wait_s,
+    )
+    cache: PypiCache = {}
+    output: list[str] = []
+    for case_id in selected:
+        output.extend([f"=== {case_id} ==="])
+        try:
+            report = inspect_case(
+                case_id,
+                dir=Path(directory),
+                client=active_client,
+                pypi_fetch=pypi_fetch,
+                max_pypi_lookups=max_pypi_lookups,
+                pypi_cache=cache,
+            )
+        except GitHubFatalError:
+            raise
+        except (GitHubError, OSError, ValueError, KeyError, TypeError) as exc:
+            output.append(f"error: {type(exc).__name__}: {redact(str(exc))}")
+        else:
+            output.extend(_condensed_report(report))
+        output.append("")
+    destination = Path(out)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temp = destination.with_name(destination.name + ".tmp")
+    temp.write_text("\n".join(output) + "\n", encoding="utf-8", newline="\n")
+    temp.replace(destination)
+    return destination

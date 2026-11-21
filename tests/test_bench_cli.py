@@ -68,6 +68,18 @@ def test_bench_snapshot_prints_disk_usage(tmp_path: Path) -> None:
     assert usage >= 3
 
 
+def test_bench_label_unknown_case_exits_two(tmp_path: Path) -> None:
+    directory = _base(tmp_path)
+
+    result = runner.invoke(
+        app,
+        ["bench", "label", "--dir", str(directory), "--case", "owner/repo#999"],
+    )
+
+    assert result.exit_code == 2
+    assert "candidate not found: owner/repo#999" in result.output
+
+
 def test_bench_report_writes_dev_report_by_default(tmp_path: Path) -> None:
     directory = _base(tmp_path, labels=[_label("owner/repo#1", "OK")])
     eval_dir = directory / "eval"

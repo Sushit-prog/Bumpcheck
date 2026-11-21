@@ -15,8 +15,8 @@ from bumpcheck.apidiff import ApiDiffResult, diff_versions
 from bumpcheck.bench.eval import evaluate as run_eval
 from bumpcheck.bench.eval import load_results
 from bumpcheck.bench.github import GitHubClient, GitHubError, RateLimitWaitTooLong
+from bumpcheck.bench.inspect_case import MAX_PYPI_LOOKUPS, redact, run_inspect_batch
 from bumpcheck.bench.inspect_case import inspect_case as run_inspect
-from bumpcheck.bench.inspect_case import redact
 from bumpcheck.bench.labels import (
     compute_agreement,
     compute_stats,
@@ -479,6 +479,11 @@ def bench_label(
         "--only",
         help="Only show cases with this miner suggestion.",
     ),
+    case: list[str] | None = typer.Option(
+        None,
+        "--case",
+        help="Only show this case id; repeatable.",
+    ),
     sample: float | None = typer.Option(
         None,
         "--sample",
@@ -507,6 +512,7 @@ def bench_label(
             dir,
             round=round,
             only=only.value if only is not None else None,
+            requested_ids=case,
             sample=sample,
             seed=seed,
             show_suggestion=show_suggestion,
@@ -615,9 +621,17 @@ def bench_inspect(
         "--max-rate-limit-wait",
         help="Longest rate-limit wait in seconds; 0 fails immediately.",
     ),
+    max_pypi_lookups: int = typer.Option(
+        MAX_PYPI_LOOKUPS,
+        "--max-pypi-lookups",
+        help="Maximum base-pin PyPI lookups per case.",
+    ),
 ) -> None:
     """Print a read-only inspection report for one candidate."""
     max_wait = _validate_max_rate_limit_wait(max_rate_limit_wait)
+    if max_pypi_lookups < 1:
+        typer.echo("--max-pypi-lookups must be one or greater", err=True)
+        raise typer.Exit(code=2)
     _guard_github_token(offline=offline, allow_unauthenticated=allow_unauthenticated)
     try:
         report = run_inspect(
@@ -627,6 +641,7 @@ def bench_inspect(
             offline=offline,
             cache_dir=cache_dir,
             max_rate_limit_wait_s=max_wait,
+            max_pypi_lookups=max_pypi_lookups,
         )
     except RateLimitWaitTooLong as exc:
         typer.echo(redact(str(exc)), err=True)
@@ -635,6 +650,80 @@ def bench_inspect(
         typer.echo(redact(str(exc)), err=True)
         raise typer.Exit(code=2) from exc
     typer.echo(report, nl=False)
+
+
+@bench_app.command("inspect-batch")
+def bench_inspect_batch(
+    dir: Path = typer.Option(
+        ...,
+        "--dir",
+        help="Directory containing candidates.jsonl.",
+    ),
+    out: Path = typer.Option(
+        ...,
+        "--out",
+        help="File to write the condensed inspection report.",
+    ),
+    only: OnlySuggestionChoice | None = typer.Option(
+        None,
+        "--only",
+        help="Only inspect cases with this miner suggestion.",
+    ),
+    case: list[str] | None = typer.Option(
+        None,
+        "--case",
+        help="Only inspect this case id; repeatable.",
+    ),
+    offline: bool = typer.Option(
+        False,
+        "--offline",
+        help="Read the response cache only; never touch the network.",
+    ),
+    cache_dir: Path | None = typer.Option(
+        None,
+        "--cache-dir",
+        help="Response cache directory (default .bumpcheck-cache/github).",
+    ),
+    allow_unauthenticated: bool = typer.Option(
+        False,
+        "--allow-unauthenticated",
+        help="Continue without GITHUB_TOKEN instead of exiting.",
+    ),
+    max_rate_limit_wait: float = typer.Option(
+        900.0,
+        "--max-rate-limit-wait",
+        help="Longest rate-limit wait in seconds; 0 fails immediately.",
+    ),
+    max_pypi_lookups: int = typer.Option(
+        MAX_PYPI_LOOKUPS,
+        "--max-pypi-lookups",
+        help="Maximum base-pin PyPI lookups per case.",
+    ),
+) -> None:
+    """Write a condensed read-only inspection report for selected cases."""
+    max_wait = _validate_max_rate_limit_wait(max_rate_limit_wait)
+    if max_pypi_lookups < 1:
+        typer.echo("--max-pypi-lookups must be one or greater", err=True)
+        raise typer.Exit(code=2)
+    _guard_github_token(offline=offline, allow_unauthenticated=allow_unauthenticated)
+    try:
+        destination = run_inspect_batch(
+            Path(dir),
+            out=Path(out),
+            only=only.value if only is not None else None,
+            case_ids=case,
+            offline=offline,
+            cache_dir=cache_dir,
+            max_rate_limit_wait_s=max_wait,
+            max_pypi_lookups=max_pypi_lookups,
+        )
+    except RateLimitWaitTooLong as exc:
+        typer.echo(redact(str(exc)), err=True)
+        raise typer.Exit(code=3) from exc
+    except (ValueError, OSError) as exc:
+        typer.echo(redact(str(exc)), err=True)
+        raise typer.Exit(code=2) from exc
+    typer.echo(f"wrote {destination}")
 
 
 @bench_app.command("snapshot")

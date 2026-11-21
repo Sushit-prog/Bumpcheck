@@ -134,6 +134,12 @@ def test_python_floor_from_spec() -> None:
     assert python_floor(">=3.10") == Version("3.10")
     assert python_floor(">=3.8,<3.13") == Version("3.8")
     assert python_floor("==3.9.*") == Version("3.9")
+    assert python_floor(">=3.9") == Version("3.9")
+
+
+def test_python_floor_requires_lower_bound_and_python_three() -> None:
+    assert python_floor("<3.12") is None
+    assert python_floor(">=2.7,<3") is None
 
 
 def test_python_floor_missing_or_malformed_returns_none() -> None:

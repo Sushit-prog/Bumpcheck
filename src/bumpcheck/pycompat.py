@@ -120,14 +120,16 @@ def allows_python(
 
 
 def python_floor(requires_python: str | None) -> Version | None:
-    """Lowest concrete version a requires-python spec allows; None when unknown."""
+    """Lowest Python 3+ version allowed; None when absent, unbounded, or unknown."""
     if not isinstance(requires_python, str) or not requires_python.strip():
         return None
     try:
         spec_set = SpecifierSet(requires_python)
     except InvalidSpecifier:
         return None
-    for major in (2, 3, 4, 5):
+    if not any(specifier.operator in {">", ">=", "~=", "=="} for specifier in spec_set):
+        return None
+    for major in (3, 4, 5):
         for minor in range(40):
             for text in (f"{major}.{minor}", f"{major}.{minor}.0"):
                 try:

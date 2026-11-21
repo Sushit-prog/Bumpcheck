@@ -226,8 +226,13 @@ def select_cases(
     seed: int = 0,
     also_labeled: set[str] | None = None,
     round1_label: str | None = None,
+    requested_ids: list[str] | None = None,
 ) -> list[str]:
     """Choose the unlabeled case_ids for a round, deterministically sorted."""
+    if requested_ids is not None:
+        unknown = [case_id for case_id in requested_ids if case_id not in candidates]
+        if unknown:
+            raise ValueError("candidate not found: " + ", ".join(unknown))
     if round < 1:
         raise ValueError("round must be one or greater")
     if round1_label is not None and round < 2:
@@ -252,8 +257,10 @@ def select_cases(
         case_ids = {
             case_id for case_id in case_ids if candidates[case_id].get("label_suggestion") == only
         }
+    if requested_ids is not None:
+        case_ids &= set(requested_ids)
     ordered = sorted(case_ids)
-    if sample is not None and ordered:
+    if sample is not None and requested_ids is None and ordered:
         count = max(1, int(sample * len(ordered) + 0.5))
         chosen = random.Random(seed).sample(ordered, min(count, len(ordered)))
         ordered = sorted(chosen)
@@ -431,6 +438,7 @@ def run_label_loop(
     show_suggestion: bool = False,
     also_dirs: list[Path] | None = None,
     round1_label: str | None = None,
+    requested_ids: list[str] | None = None,
     input_fn: Callable[[str], str] = input,
     output: Callable[[str], None] = _default_output,
     today: Callable[[], date] = date.today,
@@ -449,9 +457,25 @@ def run_label_loop(
         seed=seed,
         also_labeled=also_labeled,
         round1_label=round1_label,
+        requested_ids=requested_ids,
     )
     output(f"labeling round {round}: {len(case_ids)} case(s)")
+    if requested_ids is not None:
+        dropped: list[str] = []
+        for case_id in dict.fromkeys(requested_ids):
+            if case_id in case_ids:
+                continue
+            reason = "not selected for this round"
+            if (case_id, round) in labels:
+                reason = "already labeled this round"
+            elif only is not None and candidates[case_id].get("label_suggestion") != only:
+                reason = f"dropped by --only {only}"
+            elif also_labeled and case_id in also_labeled:
+                reason = "dropped by --also-dir"
+            dropped.append(f"{case_id} ({reason})")
+        output(f"requested cases dropped: {', '.join(dropped) if dropped else 'none'}")
     saved: list[tuple[tuple[str, int], Label | None]] = []
+    skipped_ids: list[str] = []
     labeled = skipped = undone = 0
 
     try:
@@ -474,6 +498,7 @@ def run_label_loop(
                     break
                 if choice == "s":
                     skipped += 1
+                    skipped_ids.append(case_id)
                     continue
                 if choice == "u":
                     if not saved:
@@ -509,7 +534,11 @@ def run_label_loop(
             output(f"saved {label.label} for {case_id}")
     except KeyboardInterrupt:
         output("interrupted")
-    output(f"session: {labeled} label(s) saved, {skipped} skipped, {undone} undone")
+    skipped_text = ", ".join(skipped_ids) if skipped_ids else "none"
+    output(
+        f"session: {labeled} label(s) saved, {skipped} skipped, {undone} undone; "
+        f"skipped case_ids: {skipped_text}"
+    )
     return 0
 
 

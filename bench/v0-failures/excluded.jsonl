@@ -1,0 +1,245 @@
+{"case_id": "21cmfast/21cmEMU#319", "repo": "21cmfast/21cmEMU", "pr_number": 319, "title": "build(deps): bump nbsphinx from 0.9.6 to 0.9.8 in /docs", "reason": "ci_not_attributable"}
+{"case_id": "Anekchauhan2601/AccountManagement#5", "repo": "Anekchauhan2601/AccountManagement", "pr_number": 5, "title": "FAN-DEPENDABOT: Bump the python group across 1 directory with 22 updates", "reason": "group_bump"}
+{"case_id": "Azure-Samples/Cosmic-Food-RAG-app#212", "repo": "Azure-Samples/Cosmic-Food-RAG-app", "pr_number": 212, "title": "Bump the node-requirements group across 1 directory with 24 updates", "reason": "group_bump"}
+{"case_id": "CloudReactor/cloudreactor-procwrapper#219", "repo": "CloudReactor/cloudreactor-procwrapper", "pr_number": 219, "title": "Configure Renovate", "reason": "not_single_package"}
+{"case_id": "CompbioLabUnist/UNIST-LungCancer-INHA#49", "repo": "CompbioLabUnist/UNIST-LungCancer-INHA", "pr_number": 49, "title": "Bump pypdf from 1.13 to 6.1.3 in /jwlee230/Program/Docker", "reason": "closed_without_ci_signal"}
+{"case_id": "DeepInsight-AI/deepbi-amazon-ad-api#4", "repo": "DeepInsight-AI/deepbi-amazon-ad-api", "pr_number": 4, "title": "DEP(deps): Update confuse requirement from ~=2.0.1 to ~=2.1.0", "reason": "not_single_package"}
+{"case_id": "DontShaveTheYak/sebs#7", "repo": "DontShaveTheYak/sebs", "pr_number": 7, "title": "Configure Renovate", "reason": "not_single_package"}
+{"case_id": "Dowser0/adv_bot#4", "repo": "Dowser0/adv_bot", "pr_number": 4, "title": "pip(deps): bump rich from 13.7.1 to 14.2.0", "reason": "closed_without_ci_signal"}
+{"case_id": "Drlinglong/LoreSeekerEngine#1", "repo": "Drlinglong/LoreSeekerEngine", "pr_number": 1, "title": "Update redis requirement from <7.0.0,>=5.0.0 to >=5.0.0,<8.0.0", "reason": "not_single_package"}
+{"case_id": "EnergySage/pytest-quarantine#39", "repo": "EnergySage/pytest-quarantine", "pr_number": 39, "title": "Configure Renovate", "reason": "not_single_package"}
+{"case_id": "FromDoppler/vtex#1", "repo": "FromDoppler/vtex", "pr_number": 1, "title": "Configure Renovate", "reason": "not_single_package"}
+{"case_id": "Fusion-Power-Plant-Framework/bluemira#4083", "repo": "Fusion-Power-Plant-Framework/bluemira", "pr_number": 4083, "title": "Bump numpy from 1.26.4 to 2.2.6", "reason": "no_supported_lockfile"}
+{"case_id": "Krical-C/tea-yolov5#68", "repo": "Krical-C/tea-yolov5", "pr_number": 68, "title": "Bump pip from 21.1 to 25.2 in /utils/google_app_engine", "reason": "no_supported_lockfile"}
+{"case_id": "LianaHarris360/studio#121", "repo": "LianaHarris360/studio", "pr_number": 121, "title": "Bump docker/build-push-action from 5 to 6", "reason": "no_supported_lockfile"}
+{"case_id": "LizardByte/support-bot#208", "repo": "LizardByte/support-bot", "pr_number": 208, "title": "Configure Renovate", "reason": "not_single_package"}
+{"case_id": "MartinHjelmare/leicaimage#611", "repo": "MartinHjelmare/leicaimage", "pr_number": 611, "title": "chore(deps): update dependency copier to v9.11.2 - autoclosed", "reason": "not_single_package"}
+{"case_id": "MeStrak/dr-sven#22", "repo": "MeStrak/dr-sven", "pr_number": 22, "title": "fix(deps): update dependency pandas to v2 - autoclosed", "reason": "not_single_package"}
+{"case_id": "Mohit130422/face_recognition#3", "repo": "Mohit130422/face_recognition", "pr_number": 3, "title": "Bump wheel from 0.29.0 to 0.38.1", "reason": "closed_without_ci_signal"}
+{"case_id": "Musab1khan/AutoGPT#46", "repo": "Musab1khan/AutoGPT", "pr_number": 46, "title": "build(deps-dev): bump the development-dependencies group across 1 directory with 5 updates", "reason": "group_bump"}
+{"case_id": "NdagiStanley/python-deployed#9", "repo": "NdagiStanley/python-deployed", "pr_number": 9, "title": "Update dependency python to v3 - autoclosed", "reason": "not_single_package"}
+{"case_id": "OpenTrafficCam/OTAnalytics#749", "repo": "OpenTrafficCam/OTAnalytics", "pr_number": 749, "title": "Bump av from 13.0.0 to 16.0.1", "reason": "no_supported_lockfile"}
+{"case_id": "PIYUSH-MISHRA-00/KaalChat#1", "repo": "PIYUSH-MISHRA-00/KaalChat", "pr_number": 1, "title": "Bump python-multipart from 0.0.6 to 0.0.18 in /server/fastapi_kaalchat", "reason": "closed_without_ci_signal"}
+{"case_id": "POWERFULMOVES/PMOVES-transcribe-and-fetch#34", "repo": "POWERFULMOVES/PMOVES-transcribe-and-fetch", "pr_number": 34, "title": "Bump the pip group across 3 directories with 4 updates", "reason": "group_bump"}
+{"case_id": "Qulacs-Osaka/scikit-qulacs#288", "repo": "Qulacs-Osaka/scikit-qulacs", "pr_number": 288, "title": "Update dependency pandas to v2 - autoclosed", "reason": "not_single_package"}
+{"case_id": "Rafiksashi/RAFIK#13", "repo": "Rafiksashi/RAFIK", "pr_number": 13, "title": ":arrow_up: Update cryptography requirement from ~=44.0.2 to ~=46.0.3", "reason": "not_single_package"}
+{"case_id": "RealOrangeOne/ansible-kconfig#18", "repo": "RealOrangeOne/ansible-kconfig", "pr_number": 18, "title": "Update dependency black to v26 [SECURITY] - autoclosed", "reason": "not_single_package"}
+{"case_id": "RealOrangeOne/django-plausible#23", "repo": "RealOrangeOne/django-plausible", "pr_number": 23, "title": "Update dependency mypy to v1.20.2 - autoclosed", "reason": "not_single_package"}
+{"case_id": "RiyaluxInnovates/PaksaFinancialSystem#1", "repo": "RiyaluxInnovates/PaksaFinancialSystem", "pr_number": 1, "title": "Bump python-multipart from 0.0.6 to 0.0.18", "reason": "closed_without_ci_signal"}
+{"case_id": "SAP-archive/credential-digger#371", "repo": "SAP-archive/credential-digger", "pr_number": 371, "title": "Update rich requirement from ~=14.1 to ~=14.2", "reason": "not_single_package"}
+{"case_id": "SASTRA-Projects/HallPlan#6", "repo": "SASTRA-Projects/HallPlan", "pr_number": 6, "title": "Bump pandas from 2.3.2 to 2.3.3", "reason": "closed_without_ci_signal"}
+{"case_id": "Safe-DS/Stub-Generator#218", "repo": "Safe-DS/Stub-Generator", "pr_number": 218, "title": "build(deps): bump mypy from 1.15.0 to 1.20.2 in the production group across 1 directory", "reason": "parse_mismatch"}
+{"case_id": "SheshankJoshi/Analyst_agent#2", "repo": "SheshankJoshi/Analyst_agent", "pr_number": 2, "title": "Bump wheel from 0.33.6 to 0.38.1", "reason": "closed_without_ci_signal"}
+{"case_id": "SigmaNight/basiliskLLM#964", "repo": "SigmaNight/basiliskLLM", "pr_number": 964, "title": "chore(deps): update dependency pytest to v9", "reason": "no_supported_lockfile"}
+{"case_id": "SwaragThaikkandi/SMdRQA#276", "repo": "SwaragThaikkandi/SMdRQA", "pr_number": 276, "title": "Update actions/checkout action to v4.3.1", "reason": "not_single_package"}
+{"case_id": "SwaragThaikkandi/SMdRQA#277", "repo": "SwaragThaikkandi/SMdRQA", "pr_number": 277, "title": "Update actions/checkout action to v6", "reason": "not_single_package"}
+{"case_id": "SynetoNet/syneto-openapi-themes#66", "repo": "SynetoNet/syneto-openapi-themes", "pr_number": 66, "title": "deps-dev(deps-dev): bump safety from 2.3.4 to 3.7.0", "reason": "not_single_package"}
+{"case_id": "TacoContent/tacobottwitch#54", "repo": "TacoContent/tacobottwitch", "pr_number": 54, "title": "Update twitchio requirement from ~=2.10.0 to ~=3.1.0", "reason": "not_single_package"}
+{"case_id": "TheKevJames/coveralls-python#507", "repo": "TheKevJames/coveralls-python", "pr_number": 507, "title": "chore(deps): update dependency sphinx to v8 - autoclosed", "reason": "not_single_package"}
+{"case_id": "TheKevJames/coveralls-python#638", "repo": "TheKevJames/coveralls-python", "pr_number": 638, "title": "chore(deps): update dependency sphinx to v9 - autoclosed", "reason": "not_single_package"}
+{"case_id": "Themerr/ThemerrDB#1819", "repo": "Themerr/ThemerrDB", "pr_number": 1819, "title": "Configure Renovate", "reason": "not_single_package"}
+{"case_id": "Yus314/dotfiles#30", "repo": "Yus314/dotfiles", "pr_number": 30, "title": "chore(deps): update actions/checkout action to v5.0.1 - autoclosed", "reason": "not_single_package"}
+{"case_id": "Zappatta/meshil-nickbot#23", "repo": "Zappatta/meshil-nickbot", "pr_number": 23, "title": "Bump python-telegram-bot from 13.12 to 22.5", "reason": "closed_without_ci_signal"}
+{"case_id": "Zype-Z/zUbuntu#2", "repo": "Zype-Z/zUbuntu", "pr_number": 2, "title": "Configure Renovate", "reason": "not_single_package"}
+{"case_id": "aarelaponin/risk_poc#32", "repo": "aarelaponin/risk_poc", "pr_number": 32, "title": ":arrow_up: Bump rich from 10.16.2 to 14.2.0", "reason": "not_single_package"}
+{"case_id": "aexoden/factortool#3", "repo": "aexoden/factortool", "pr_number": 3, "title": "Update python Docker tag - autoclosed", "reason": "not_single_package"}
+{"case_id": "ai-cfia/ailab-datastore#26", "repo": "ai-cfia/ailab-datastore", "pr_number": 26, "title": "chore: Configure Renovate", "reason": "not_single_package"}
+{"case_id": "ai-cfia/api-test#20", "repo": "ai-cfia/api-test", "pr_number": 20, "title": "Configure Renovate", "reason": "not_single_package"}
+{"case_id": "ai-cfia/devops#40", "repo": "ai-cfia/devops", "pr_number": 40, "title": "Configure Renovate", "reason": "not_single_package"}
+{"case_id": "ai-cfia/report-automation#3", "repo": "ai-cfia/report-automation", "pr_number": 3, "title": "Configure Renovate", "reason": "not_single_package"}
+{"case_id": "alejandrgaspar/pub-analyzer#198", "repo": "alejandrgaspar/pub-analyzer", "pr_number": 198, "title": "⬆ Bump the main-dependencies group across 1 directory with 3 updates", "reason": "group_bump"}
+{"case_id": "alphagov/document-download-api#384", "repo": "alphagov/document-download-api", "pr_number": 384, "title": "Bump eventlet from 0.39.1 to 0.40.3", "reason": "parse_mismatch"}
+{"case_id": "alphagov/document-download-frontend#309", "repo": "alphagov/document-download-frontend", "pr_number": 309, "title": "Bump eventlet from 0.39.1 to 0.40.3", "reason": "parse_mismatch"}
+{"case_id": "alphagov/notifications-antivirus#192", "repo": "alphagov/notifications-antivirus", "pr_number": 192, "title": "Bump eventlet from 0.39.1 to 0.40.3", "reason": "parse_mismatch"}
+{"case_id": "alphagov/notifications-functional-tests#593", "repo": "alphagov/notifications-functional-tests", "pr_number": 593, "title": "Bump eventlet from 0.37.0 to 0.40.3", "reason": "parse_mismatch"}
+{"case_id": "alphagov/notifications-template-preview#903", "repo": "alphagov/notifications-template-preview", "pr_number": 903, "title": "Bump eventlet from 0.39.1 to 0.40.3", "reason": "parse_mismatch"}
+{"case_id": "ambuda-org/ambuda#536", "repo": "ambuda-org/ambuda", "pr_number": 536, "title": "Bump markdown-it-py from 2.1.0 to 4.0.0", "reason": "no_supported_lockfile"}
+{"case_id": "ambuda-org/ambuda#537", "repo": "ambuda-org/ambuda", "pr_number": 537, "title": "Bump python-slugify from 6.1.2 to 8.0.4", "reason": "no_supported_lockfile"}
+{"case_id": "ambuda-org/ambuda#540", "repo": "ambuda-org/ambuda", "pr_number": 540, "title": "Bump mypy-extensions from 0.4.3 to 1.1.0", "reason": "no_supported_lockfile"}
+{"case_id": "ambuda-org/ambuda#548", "repo": "ambuda-org/ambuda", "pr_number": 548, "title": "Bump regex from 2022.6.2 to 2025.10.23", "reason": "no_supported_lockfile"}
+{"case_id": "anas-stuff/LeetCode#2", "repo": "anas-stuff/LeetCode", "pr_number": 2, "title": "Configure Renovate", "reason": "not_single_package"}
+{"case_id": "aoisupersix/git2bit#14", "repo": "aoisupersix/git2bit", "pr_number": 14, "title": "Update dependency pylint to v2.17.7 - autoclosed", "reason": "not_single_package"}
+{"case_id": "apify/apify-client-python#551", "repo": "apify/apify-client-python", "pr_number": 551, "title": "chore(deps): update dependency markdownlint to ^0.40.0 - autoclosed", "reason": "not_single_package"}
+{"case_id": "at-gmbh/at-python-template#138", "repo": "at-gmbh/at-python-template", "pr_number": 138, "title": "Update pre-commit hook astral-sh/ruff-pre-commit to v0.14.14 - autoclosed", "reason": "not_single_package"}
+{"case_id": "awslabs/s3-connector-for-pytorch#345", "repo": "awslabs/s3-connector-for-pytorch", "pr_number": 345, "title": "build(deps): update pillow requirement from <=11.2.1 to <=11.3.0 in /s3torchconnectorclient in the python-packages group", "reason": "not_single_package"}
+{"case_id": "bcgov/nr-rfc-processing#116", "repo": "bcgov/nr-rfc-processing", "pr_number": 116, "title": "chore(deps): update dependency black to v25 - autoclosed", "reason": "not_single_package"}
+{"case_id": "beantownpub/contact-api#24", "repo": "beantownpub/contact-api", "pr_number": 24, "title": "Configure Renovate", "reason": "not_single_package"}
+{"case_id": "bigblueshoe777/mira-recsys-agent#4", "repo": "bigblueshoe777/mira-recsys-agent", "pr_number": 4, "title": "Bump pandas from 2.2.3 to 2.3.3", "reason": "closed_without_ci_signal"}
+{"case_id": "binary-butterfly/ocpdb#146", "repo": "binary-butterfly/ocpdb", "pr_number": 146, "title": "Update lxml requirement from ~=5.4.0 to ~=6.0.2", "reason": "not_single_package"}
+{"case_id": "binary-butterfly/ocpdb#164", "repo": "binary-butterfly/ocpdb", "pr_number": 164, "title": "Update kombu requirement from ~=5.5.4 to ~=5.6.0", "reason": "not_single_package"}
+{"case_id": "brianegge/dahua#15", "repo": "brianegge/dahua", "pr_number": 15, "title": "Update dependency homeassistant to v2025 - autoclosed", "reason": "not_single_package"}
+{"case_id": "buildbot/buildbot#8696", "repo": "buildbot/buildbot", "pr_number": 8696, "title": "requirements: bump ruff from 0.11.13 to 0.14.0", "reason": "not_single_package"}
+{"case_id": "canonical/charmcraftcache#4", "repo": "canonical/charmcraftcache", "pr_number": 4, "title": "Configure Renovate", "reason": "not_single_package"}
+{"case_id": "canonical/cos-registration-server-k8s-operator#40", "repo": "canonical/cos-registration-server-k8s-operator", "pr_number": 40, "title": "chore(deps): update dependency ops to v3", "reason": "parse_mismatch"}
+{"case_id": "canonical/data-platform-workflows#19", "repo": "canonical/data-platform-workflows", "pr_number": 19, "title": "Configure Renovate", "reason": "not_single_package"}
+{"case_id": "canonical/flask-multipass-saml-groups#44", "repo": "canonical/flask-multipass-saml-groups", "pr_number": 44, "title": "fix(deps): update python to ~=3.14.2", "reason": "not_single_package"}
+{"case_id": "canonical/flask-multipass-saml-groups#46", "repo": "canonical/flask-multipass-saml-groups", "pr_number": 46, "title": "fix(deps): update dependency xmlsec to v1.3.17", "reason": "no_supported_lockfile"}
+{"case_id": "canonical/imagecraft#240", "repo": "canonical/imagecraft", "pr_number": 240, "title": "build(deps): update dependency craft-application to v6 (main) - autoclosed", "reason": "not_single_package"}
+{"case_id": "canonical/mysql-k8s-operator#397", "repo": "canonical/mysql-k8s-operator", "pr_number": 397, "title": "Update Python dependencies (major)", "reason": "not_single_package"}
+{"case_id": "canonical/mysql-k8s-operator#398", "repo": "canonical/mysql-k8s-operator", "pr_number": 398, "title": "Lock file maintenance Python dependencies", "reason": "not_single_package"}
+{"case_id": "canonical/mysql-k8s-operator#579", "repo": "canonical/mysql-k8s-operator", "pr_number": 579, "title": "Update dependency cryptography to v44 [SECURITY]", "reason": "not_single_package"}
+{"case_id": "canonical/mysql-k8s-operator#641", "repo": "canonical/mysql-k8s-operator", "pr_number": 641, "title": "Update dependency mysql-connector-python to ~=9.5.0", "reason": "not_single_package"}
+{"case_id": "canonical/mysql-k8s-operator#674", "repo": "canonical/mysql-k8s-operator", "pr_number": 674, "title": "Update GitHub actions (major)", "reason": "not_single_package"}
+{"case_id": "canonical/mysql-k8s-operator#676", "repo": "canonical/mysql-k8s-operator", "pr_number": 676, "title": "Update charmcraft.yaml build tools", "reason": "not_single_package"}
+{"case_id": "canonical/mysql-operator#424", "repo": "canonical/mysql-operator", "pr_number": 424, "title": "Update Python dependencies (major)", "reason": "not_single_package"}
+{"case_id": "canonical/mysql-operator#425", "repo": "canonical/mysql-operator", "pr_number": 425, "title": "Lock file maintenance Python dependencies", "reason": "not_single_package"}
+{"case_id": "canonical/mysql-operator#596", "repo": "canonical/mysql-operator", "pr_number": 596, "title": "Update dependency mysql-connector-python to ~=9.5", "reason": "not_single_package"}
+{"case_id": "canonical/mysql-operator#704", "repo": "canonical/mysql-operator", "pr_number": 704, "title": "Update GitHub actions (major)", "reason": "not_single_package"}
+{"case_id": "canonical/mysql-operator#706", "repo": "canonical/mysql-operator", "pr_number": 706, "title": "Update charmcraft.yaml build tools", "reason": "not_single_package"}
+{"case_id": "celsomartinez/data-with-copilot#7", "repo": "celsomartinez/data-with-copilot", "pr_number": 7, "title": "build(deps): bump pandas from 2.2.3 to 2.3.3 in /workshop", "reason": "closed_without_ci_signal"}
+{"case_id": "classicvalues/255#3", "repo": "classicvalues/255", "pr_number": 3, "title": "chore: Configure Renovate", "reason": "not_single_package"}
+{"case_id": "classicvalues/Masonry#1", "repo": "classicvalues/Masonry", "pr_number": 1, "title": "chore: Configure Renovate", "reason": "not_single_package"}
+{"case_id": "classicvalues/Tokens#1", "repo": "classicvalues/Tokens", "pr_number": 1, "title": "chore: Configure Renovate", "reason": "not_single_package"}
+{"case_id": "cloudsmith-io/cloudsmith-cli#200", "repo": "cloudsmith-io/cloudsmith-cli", "pr_number": 200, "title": "chore(deps): bump virtualenv from 20.24.2 to 20.26.6 in the pip group across 1 directory", "reason": "parse_mismatch"}
+{"case_id": "codesapienbe/openvision-mcp#1", "repo": "codesapienbe/openvision-mcp", "pr_number": 1, "title": "chore(deps): bump python-multipart from 0.0.6 to 0.0.18", "reason": "closed_without_ci_signal"}
+{"case_id": "communitiesuk/funding-service#1063", "repo": "communitiesuk/funding-service", "pr_number": 1063, "title": "Update Python - autoclosed", "reason": "not_single_package"}
+{"case_id": "con2/kompassi#876", "repo": "con2/kompassi", "pr_number": 876, "title": "chore(deps): update python docker tag to v3.14 - autoclosed", "reason": "not_single_package"}
+{"case_id": "crazyuploader/OSL#105", "repo": "crazyuploader/OSL", "pr_number": 105, "title": "Update actions/checkout action to v5.0.1 - autoclosed", "reason": "not_single_package"}
+{"case_id": "crazyuploader/OSL#106", "repo": "crazyuploader/OSL", "pr_number": 106, "title": "Update actions/checkout action to v6", "reason": "not_single_package"}
+{"case_id": "crs4/life_monitor#406", "repo": "crs4/life_monitor", "pr_number": 406, "title": "build(deps): bump eventlet from 0.36.1 to 0.40.3", "reason": "closed_without_ci_signal"}
+{"case_id": "cyr-ius/home-assistant#180", "repo": "cyr-ius/home-assistant", "pr_number": 180, "title": "Bump uv from 0.8.9 to 0.9.6", "reason": "closed_without_ci_signal"}
+{"case_id": "danoan/berry#8", "repo": "danoan/berry", "pr_number": 8, "title": "Bump sounddevice from 0.5.2 to 0.5.3", "reason": "no_supported_lockfile"}
+{"case_id": "darac/adventofcode#355", "repo": "darac/adventofcode", "pr_number": 355, "title": "chore(deps): update python to <3.15,>=3.14 - autoclosed", "reason": "not_single_package"}
+{"case_id": "djlint/djLint#1031", "repo": "djlint/djLint", "pr_number": 1031, "title": "chore(deps): update dependency @fullhuman/postcss-purgecss to v7 - autoclosed", "reason": "not_single_package"}
+{"case_id": "djsaikrishna/HoneyRose_Stream_2.23#1", "repo": "djsaikrishna/HoneyRose_Stream_2.23", "pr_number": 1, "title": "Configure Renovate", "reason": "not_single_package"}
+{"case_id": "dsayling/ssfa#35", "repo": "dsayling/ssfa", "pr_number": 35, "title": "Update dependency python to v3 - autoclosed", "reason": "not_single_package"}
+{"case_id": "eifinger/aioweenect#260", "repo": "eifinger/aioweenect", "pr_number": 260, "title": "chore(deps): bump actions/checkout from 3 to 4", "reason": "no_supported_lockfile"}
+{"case_id": "freifunkMUC/wgkex#196", "repo": "freifunkMUC/wgkex", "pr_number": 196, "title": "build(deps): bump flask-mqtt from 1.1.1 to 1.2.1", "reason": "parse_mismatch"}
+{"case_id": "galaxyproject/galaxy#21189", "repo": "galaxyproject/galaxy", "pr_number": 21189, "title": "Bump starlette from 0.48.0 to 0.49.1 in /lib/galaxy/dependencies", "reason": "no_supported_lockfile"}
+{"case_id": "getindata/kedro-vertexai#259", "repo": "getindata/kedro-vertexai", "pr_number": 259, "title": "build(deps): bump mlflow from 2.22.1 to 2.22.2", "reason": "parse_mismatch"}
+{"case_id": "glotaran/pyglotaran#1586", "repo": "glotaran/pyglotaran", "pr_number": 1586, "title": "Bump the runtime-dependencies group across 1 directory with 8 updates", "reason": "group_bump"}
+{"case_id": "gutembergferreira/oraculo-icms#30", "repo": "gutembergferreira/oraculo-icms", "pr_number": 30, "title": "Bump python-multipart from 0.0.9 to 0.0.18 in /backend", "reason": "closed_without_ci_signal"}
+{"case_id": "hacf-fr/freebox-api#829", "repo": "hacf-fr/freebox-api", "pr_number": 829, "title": "Bump poetry from 1.8.4 to 2.2.1 in /.github/workflows", "reason": "no_supported_lockfile"}
+{"case_id": "hacf-fr/freebox-api#831", "repo": "hacf-fr/freebox-api", "pr_number": 831, "title": "Bump safety from 3.3.1 to 3.6.2", "reason": "parse_mismatch"}
+{"case_id": "hacf-fr/freebox-api#836", "repo": "hacf-fr/freebox-api", "pr_number": 836, "title": "Bump nox from 2024.10.9 to 2025.10.16 in /.github/workflows", "reason": "no_supported_lockfile"}
+{"case_id": "hacf-fr/meteofrance-api#836", "repo": "hacf-fr/meteofrance-api", "pr_number": 836, "title": "build(deps): bump typing-extensions from 4.13.0 to 4.13.2", "reason": "ci_not_attributable"}
+{"case_id": "hacf-fr/meteofrance-api#868", "repo": "hacf-fr/meteofrance-api", "pr_number": 868, "title": "build(deps): bump poetry from 1.8.4 to 2.2.1 in /.github/workflows", "reason": "no_supported_lockfile"}
+{"case_id": "hacf-fr/meteofrance-api#870", "repo": "hacf-fr/meteofrance-api", "pr_number": 870, "title": "build(deps-dev): bump safety from 3.3.1 to 3.6.2", "reason": "parse_mismatch"}
+{"case_id": "hacf-fr/meteofrance-api#876", "repo": "hacf-fr/meteofrance-api", "pr_number": 876, "title": "build(deps): bump nox from 2024.10.9 to 2025.10.16 in /.github/workflows", "reason": "no_supported_lockfile"}
+{"case_id": "hacf-fr/meteofrance-api#879", "repo": "hacf-fr/meteofrance-api", "pr_number": 879, "title": "build(deps): bump virtualenv from 20.29.3 to 20.35.4 in /.github/workflows", "reason": "no_supported_lockfile"}
+{"case_id": "hectorlm/MNF-SR#3", "repo": "hectorlm/MNF-SR", "pr_number": 3, "title": "chore(deps): bump pandas from 2.3.1 to 2.3.3", "reason": "closed_without_ci_signal"}
+{"case_id": "hezicyan/cms-ui#40", "repo": "hezicyan/cms-ui", "pr_number": 40, "title": "build(deps): update python-telegram-bot requirement from <21.10,>=21.9 to >=21.9,<22.6", "reason": "not_single_package"}
+{"case_id": "iamapsrajput/vanipost#4", "repo": "iamapsrajput/vanipost", "pr_number": 4, "title": "Bump python-multipart from 0.0.6 to 0.0.18", "reason": "closed_without_ci_signal"}
+{"case_id": "ibis-project/ibis#11646", "repo": "ibis-project/ibis", "pr_number": 11646, "title": "chore(deps): update ghcr.io/risingwavelabs/risingwave docker tag to v2.7.2", "reason": "not_single_package"}
+{"case_id": "ibis-project/ibis#11662", "repo": "ibis-project/ibis", "pr_number": 11662, "title": "chore(deps): update bitnamilegacy/spark docker tag to v4", "reason": "not_single_package"}
+{"case_id": "iiuni/projektzapisy#1684", "repo": "iiuni/projektzapisy", "pr_number": 1684, "title": "Update dependency gunicorn to v22 [SECURITY]", "reason": "not_single_package"}
+{"case_id": "intel/mfd-code-quality#10", "repo": "intel/mfd-code-quality", "pr_number": 10, "title": "chore(deps): update pytest-xdist requirement from ~=3.6.1 to ~=3.8.0", "reason": "not_single_package"}
+{"case_id": "intel/mfd-code-quality#13", "repo": "intel/mfd-code-quality", "pr_number": 13, "title": "chore(deps): update pytest-cov requirement from ~=5.0.0 to ~=7.0.0", "reason": "not_single_package"}
+{"case_id": "intel/mfd-code-quality#14", "repo": "intel/mfd-code-quality", "pr_number": 14, "title": "chore(deps): update coverage requirement from ~=7.3.0 to ~=7.11.0", "reason": "not_single_package"}
+{"case_id": "intel/mfd-code-quality#9", "repo": "intel/mfd-code-quality", "pr_number": 9, "title": "chore(deps): update pytest-mock requirement from ~=3.14 to ~=3.15", "reason": "not_single_package"}
+{"case_id": "jairhenrique/dataclasses-avroschema#26", "repo": "jairhenrique/dataclasses-avroschema", "pr_number": 26, "title": "build(deps): bump actions/checkout from 3 to 4", "reason": "no_supported_lockfile"}
+{"case_id": "javydekoning/ha-xcomfort-bridge#111", "repo": "javydekoning/ha-xcomfort-bridge", "pr_number": 111, "title": "chore(deps): update pre-commit hook astral-sh/ruff-pre-commit to v0.14.14", "reason": "not_single_package"}
+{"case_id": "javydekoning/ha-xcomfort-bridge#113", "repo": "javydekoning/ha-xcomfort-bridge", "pr_number": 113, "title": "chore(deps): update dependency homeassistant to v2025.12.5 - autoclosed", "reason": "not_single_package"}
+{"case_id": "jaxxstorm/pulumi-examples#173", "repo": "jaxxstorm/pulumi-examples", "pr_number": 173, "title": "Configure Renovate", "reason": "not_single_package"}
+{"case_id": "jynus/dispatch#384", "repo": "jynus/dispatch", "pr_number": 384, "title": "Bump faker from 13.15.1 to 37.12.0", "reason": "parse_mismatch"}
+{"case_id": "kimata/rasp-shutter#111", "repo": "kimata/rasp-shutter", "pr_number": 111, "title": "chore(deps): update dependency @vitejs/plugin-vue to v6 - autoclosed", "reason": "not_single_package"}
+{"case_id": "kimata/unit-cooler#54", "repo": "kimata/unit-cooler", "pr_number": 54, "title": "chore(deps): update dependency eslint-plugin-react-hooks to v7 - autoclosed", "reason": "not_single_package"}
+{"case_id": "kimata/wattmeter-sharp#13", "repo": "kimata/wattmeter-sharp", "pr_number": 13, "title": "chore(deps): update dorny/test-reporter action to v2 - autoclosed", "reason": "not_single_package"}
+{"case_id": "kivy/kivy#9210", "repo": "kivy/kivy", "pr_number": 9210, "title": "chore(deps): update dependency cibuildwheel to ~=3.3.1", "reason": "not_single_package"}
+{"case_id": "kivy/kivy#9215", "repo": "kivy/kivy", "pr_number": 9215, "title": "Update actions/checkout action to v6", "reason": "not_single_package"}
+{"case_id": "kivy/kivy#9223", "repo": "kivy/kivy", "pr_number": 9223, "title": "chore(deps): update softprops/action-gh-release action to v2.5.0", "reason": "not_single_package"}
+{"case_id": "kivy/kivy-sdk-packager#143", "repo": "kivy/kivy-sdk-packager", "pr_number": 143, "title": "Update dependency packaging to v25 - autoclosed", "reason": "not_single_package"}
+{"case_id": "koba-84/dst#9", "repo": "koba-84/dst", "pr_number": 9, "title": "Bump multidict from 6.0.5 to 6.7.0", "reason": "no_supported_lockfile"}
+{"case_id": "kronostechnologies/aws-snapshot-recovery#3", "repo": "kronostechnologies/aws-snapshot-recovery", "pr_number": 3, "title": "chore: Configure Renovate", "reason": "not_single_package"}
+{"case_id": "liamtoozer/liam-runner#63", "repo": "liamtoozer/liam-runner", "pr_number": 63, "title": "Bump the production-dependencies group across 1 directory with 20 updates", "reason": "group_bump"}
+{"case_id": "liqd/liqd-site#477", "repo": "liqd/liqd-site", "pr_number": 477, "title": "chore(deps): update dependency django to v4.2.27 - autoclosed", "reason": "not_single_package"}
+{"case_id": "liqd/liqd-site#479", "repo": "liqd/liqd-site", "pr_number": 479, "title": "chore(deps): update dependency gunicorn to v23 - autoclosed", "reason": "not_single_package"}
+{"case_id": "loonghao/py-dem-bones#7", "repo": "loonghao/py-dem-bones", "pr_number": 7, "title": "chore(deps): update dependency ruff to <0.14.15 - autoclosed", "reason": "not_single_package"}
+{"case_id": "loonghao/repo-template#50", "repo": "loonghao/repo-template", "pr_number": 50, "title": "chore(deps): update dependency ruff to ^0.14.0 - autoclosed", "reason": "not_single_package"}
+{"case_id": "lsst-sqre/phalanx#5731", "repo": "lsst-sqre/phalanx", "pr_number": 5731, "title": "Update ghcr.io/lsst-sqre/lsst-tap-service Docker tag to v3.12.0 - autoclosed", "reason": "not_single_package"}
+{"case_id": "lsst-sqre/phalanx#5732", "repo": "lsst-sqre/phalanx", "pr_number": 5732, "title": "Update ghcr.io/lsst-sqre/lsst-tap-uws-db Docker tag to v3.12.0 - autoclosed", "reason": "not_single_package"}
+{"case_id": "luanarmo/watchedmovies#127", "repo": "luanarmo/watchedmovies", "pr_number": 127, "title": "build(deps): bump django-stubs[compatible-mypy] from 4.2.7 to 5.2.7", "reason": "no_supported_lockfile"}
+{"case_id": "luanarmo/watchedmovies#131", "repo": "luanarmo/watchedmovies", "pr_number": 131, "title": "build(deps): bump djangorestframework-stubs[compatible-mypy] from 3.14.5 to 3.16.5", "reason": "no_supported_lockfile"}
+{"case_id": "mamh-mixed/loguru#11", "repo": "mamh-mixed/loguru", "pr_number": 11, "title": "Bump pytest-mypy-plugins from 2.0.0 to 3.0.0", "reason": "no_supported_lockfile"}
+{"case_id": "marcosschroh/dc-avro#291", "repo": "marcosschroh/dc-avro", "pr_number": 291, "title": "build(deps-dev): bump ruff from 0.12.12 to 0.14.3", "reason": "closed_without_ci_signal"}
+{"case_id": "marcosschroh/dc-avro#292", "repo": "marcosschroh/dc-avro", "pr_number": 292, "title": "build(deps-dev): bump pytest-cov from 6.3.0 to 7.0.0", "reason": "closed_without_ci_signal"}
+{"case_id": "masar-edu/chat-backend#16", "repo": "masar-edu/chat-backend", "pr_number": 16, "title": "Bump sentry-sdk from 2.34.1 to 2.42.1", "reason": "no_supported_lockfile"}
+{"case_id": "masar-edu/chat-backend#3", "repo": "masar-edu/chat-backend", "pr_number": 3, "title": "Bump msgpack from 1.1.1 to 1.1.2", "reason": "no_supported_lockfile"}
+{"case_id": "masar-edu/chat-backend#4", "repo": "masar-edu/chat-backend", "pr_number": 4, "title": "Bump psycopg2 from 2.9.10 to 2.9.11", "reason": "no_supported_lockfile"}
+{"case_id": "masar-edu/chat-backend#6", "repo": "masar-edu/chat-backend", "pr_number": 6, "title": "Bump tomli from 2.2.1 to 2.3.0", "reason": "no_supported_lockfile"}
+{"case_id": "masar-edu/chat-backend#7", "repo": "masar-edu/chat-backend", "pr_number": 7, "title": "Bump pyyaml from 6.0.2 to 6.0.3", "reason": "no_supported_lockfile"}
+{"case_id": "materialsproject/atomate2#1302", "repo": "materialsproject/atomate2", "pr_number": 1302, "title": "Bump chgnet from 0.3.8 to 0.4.2", "reason": "no_supported_lockfile"}
+{"case_id": "matiuszka/smort-query#205", "repo": "matiuszka/smort-query", "pr_number": 205, "title": "Update dependency wheel to v0.46.3 - autoclosed", "reason": "not_single_package"}
+{"case_id": "matthew-shaw/conflux#10", "repo": "matthew-shaw/conflux", "pr_number": 10, "title": "Bump email-validator from 2.2.0 to 2.3.0", "reason": "parse_mismatch"}
+{"case_id": "matthew-shaw/conflux#13", "repo": "matthew-shaw/conflux", "pr_number": 13, "title": "Bump pytest-cov from 6.2.1 to 7.0.0", "reason": "closed_without_ci_signal"}
+{"case_id": "matthew-shaw/conflux#17", "repo": "matthew-shaw/conflux", "pr_number": 17, "title": "Bump mypy from 1.17.1 to 1.18.2", "reason": "closed_without_ci_signal"}
+{"case_id": "mauryasunil1/InvenTree#33", "repo": "mauryasunil1/InvenTree", "pr_number": 33, "title": "chore(deps): bump mkdocs-include-markdown-plugin from 7.1.6 to 7.1.8 in /docs", "reason": "parse_mismatch"}
+{"case_id": "mechmind-dwv/SALVEMOS_VIDA#17", "repo": "mechmind-dwv/SALVEMOS_VIDA", "pr_number": 17, "title": "Bump the pip group across 1 directory with 2 updates", "reason": "group_bump"}
+{"case_id": "mitodl/bootcamp-ecommerce#1458", "repo": "mitodl/bootcamp-ecommerce", "pr_number": 1458, "title": "fix(deps): replace dependency babel-eslint with @babel/eslint-parser ^7.11.0", "reason": "not_single_package"}
+{"case_id": "mmartin-sub/libriscribe#13", "repo": "mmartin-sub/libriscribe", "pr_number": 13, "title": "Update rich requirement from ~=13.7 to ~=14.2", "reason": "not_single_package"}
+{"case_id": "mozilla-conduit/lando#593", "repo": "mozilla-conduit/lando", "pr_number": 593, "title": "build(deps): bump rcssmin from 1.1.2 to 1.2.2", "reason": "closed_without_ci_signal"}
+{"case_id": "mozilla-conduit/lando#598", "repo": "mozilla-conduit/lando", "pr_number": 598, "title": "build(deps): bump rjsmin from 1.2.2 to 1.2.5", "reason": "closed_without_ci_signal"}
+{"case_id": "nathanpainchaud/graph-neural-networks#54", "repo": "nathanpainchaud/graph-neural-networks", "pr_number": 54, "title": "Update dependency torch to >=2.10,<2.11 - autoclosed", "reason": "not_single_package"}
+{"case_id": "one-zero-eight/schedule#132", "repo": "one-zero-eight/schedule", "pr_number": 132, "title": "chore(deps): update pytz requirement from ~=2024.2 to ~=2025.2 in the python-dependencies group", "reason": "not_single_package"}
+{"case_id": "one-zero-eight/search#133", "repo": "one-zero-eight/search", "pr_number": 133, "title": "chore(deps): bump the python-dependencies group with 4 updates", "reason": "group_bump"}
+{"case_id": "openshift-assisted/prow-jobs-scraper#435", "repo": "openshift-assisted/prow-jobs-scraper", "pr_number": 435, "title": "NO-ISSUE: Bump the python-dependencies group across 1 directory with 19 updates", "reason": "group_bump"}
+{"case_id": "optivoo2/n8n-marketplace#2", "repo": "optivoo2/n8n-marketplace", "pr_number": 2, "title": "build(deps): bump python-multipart from 0.0.6 to 0.0.18 in /api", "reason": "closed_without_ci_signal"}
+{"case_id": "pallets-eco/cachelib#410", "repo": "pallets-eco/cachelib", "pr_number": 410, "title": "Bump redis from 5.0.1 to 5.0.8 in /requirements", "reason": "no_supported_lockfile"}
+{"case_id": "peaceiris/mkdocs-material-boilerplate#577", "repo": "peaceiris/mkdocs-material-boilerplate", "pr_number": 577, "title": "chore(deps): update dependency packaging to v25 - autoclosed", "reason": "not_single_package"}
+{"case_id": "pglombardo/pwpush-cli#1183", "repo": "pglombardo/pwpush-cli", "pr_number": 1183, "title": ":arrow_up: Bump cryptography from 46.0.2 to 46.0.3", "reason": "not_single_package"}
+{"case_id": "projectcaluma/alexandria#917", "repo": "projectcaluma/alexandria", "pr_number": 917, "title": "chore(deps-dev): bump pytest-randomly from 3.16.0 to 4.0.1", "reason": "closed_without_ci_signal"}
+{"case_id": "pyiron/cmmc_env#31", "repo": "pyiron/cmmc_env", "pr_number": 31, "title": "Bump mkl from 2024.2.2 to 2025.3.0", "reason": "closed_without_ci_signal"}
+{"case_id": "pyiron/pyiron_workflow_lammps#17", "repo": "pyiron/pyiron_workflow_lammps", "pr_number": 17, "title": "Bump pandas from 2.3.1 to 2.3.3", "reason": "no_supported_lockfile"}
+{"case_id": "pyiron/pyiron_workflow_lammps#23", "repo": "pyiron/pyiron_workflow_lammps", "pr_number": 23, "title": "Bump pysqa from 0.3.0 to 0.3.3", "reason": "no_supported_lockfile"}
+{"case_id": "pypi/warehouse#18729", "repo": "pypi/warehouse", "pr_number": 18729, "title": "chore(deps): bump lxml from 5.3.2 to 6.0.2", "reason": "no_supported_lockfile"}
+{"case_id": "pyto86pri/python-project-template#16", "repo": "pyto86pri/python-project-template", "pr_number": 16, "title": "chore(deps): update dependency isort to v5.13.2 - autoclosed", "reason": "not_single_package"}
+{"case_id": "rafailmdzdv/ssaem#34", "repo": "rafailmdzdv/ssaem", "pr_number": 34, "title": "chore(deps): update dependency pyright to v1.1.411", "reason": "other"}
+{"case_id": "release-engineering/ubi-manifest#312", "repo": "release-engineering/ubi-manifest", "pr_number": 312, "title": "chore(deps): update all dependencies", "reason": "group_bump"}
+{"case_id": "release-engineering/ubi-population-tool#280", "repo": "release-engineering/ubi-population-tool", "pr_number": 280, "title": "Update all dependencies", "reason": "group_bump"}
+{"case_id": "richardokonicha/parsig.service#2", "repo": "richardokonicha/parsig.service", "pr_number": 2, "title": "Bump path-parse from 1.0.6 to 1.0.7 in /frontend", "reason": "no_supported_lockfile"}
+{"case_id": "rtomyj/hero-bot#66", "repo": "rtomyj/hero-bot", "pr_number": 66, "title": "chore(deps): update dependency wheel to v0.46.3 - autoclosed", "reason": "not_single_package"}
+{"case_id": "ryoppippi/rye-github-actions-example#1", "repo": "ryoppippi/rye-github-actions-example", "pr_number": 1, "title": "Configure Renovate", "reason": "not_single_package"}
+{"case_id": "saintbyte/worldmarkers#11", "repo": "saintbyte/worldmarkers", "pr_number": 11, "title": "Configure Renovate", "reason": "not_single_package"}
+{"case_id": "sci-oer/student-cli#180", "repo": "sci-oer/student-cli", "pr_number": 180, "title": "chore(deps): update dependency wheel to v0.46.3 - autoclosed", "reason": "not_single_package"}
+{"case_id": "smirror/programming-bitcoin#71", "repo": "smirror/programming-bitcoin", "pr_number": 71, "title": "chore(deps): update actions/checkout digest to 93cb6ef", "reason": "not_single_package"}
+{"case_id": "smirror/programming-bitcoin#72", "repo": "smirror/programming-bitcoin", "pr_number": 72, "title": "chore(deps): update actions/checkout action to v6", "reason": "not_single_package"}
+{"case_id": "srl-labs/clab-io-draw#100", "repo": "srl-labs/clab-io-draw", "pr_number": 100, "title": "Bump textual from 6.1.0 to 6.4.0", "reason": "no_supported_lockfile"}
+{"case_id": "srl-labs/clab-io-draw#79", "repo": "srl-labs/clab-io-draw", "pr_number": 79, "title": "Bump wcwidth from 0.2.13 to 0.2.14", "reason": "no_supported_lockfile"}
+{"case_id": "srl-labs/clab-io-draw#84", "repo": "srl-labs/clab-io-draw", "pr_number": 84, "title": "Bump pyyaml from 6.0.2 to 6.0.3", "reason": "no_supported_lockfile"}
+{"case_id": "srl-labs/clab-io-draw#90", "repo": "srl-labs/clab-io-draw", "pr_number": 90, "title": "Bump textual-dev from 1.7.0 to 1.8.0", "reason": "no_supported_lockfile"}
+{"case_id": "srl-labs/clab-io-draw#96", "repo": "srl-labs/clab-io-draw", "pr_number": 96, "title": "Bump ruamel-yaml from 0.18.15 to 0.18.16", "reason": "no_supported_lockfile"}
+{"case_id": "talkiq/gcloud-aio#947", "repo": "talkiq/gcloud-aio", "pr_number": 947, "title": "chore(deps): update node.js to v24.13.0 - autoclosed", "reason": "not_single_package"}
+{"case_id": "tanmayparikh/alectra-utilities-ha#5", "repo": "tanmayparikh/alectra-utilities-ha", "pr_number": 5, "title": "Bump colorlog from 6.9.0 to 6.10.1", "reason": "closed_without_ci_signal"}
+{"case_id": "tektronix/python-package-ci-cd#675", "repo": "tektronix/python-package-ci-cd", "pr_number": 675, "title": "chore(python-deps): update poetry dependencies for actions/update_development_dependencies and dev (minor) - autoclosed", "reason": "group_bump"}
+{"case_id": "tektronix/python-package-ci-cd#690", "repo": "tektronix/python-package-ci-cd", "pr_number": 690, "title": "chore(python-deps): update dependency dulwich to v0.25.2 in all dependant actions - autoclosed", "reason": "not_single_package"}
+{"case_id": "tektronix/python-package-ci-cd#765", "repo": "tektronix/python-package-ci-cd", "pr_number": 765, "title": "chore(python-deps): update poetry dependencies for actions/create_unique_testpypi_version and dev (major) - autoclosed", "reason": "group_bump"}
+{"case_id": "timmo001/system-bridge-connector#90", "repo": "timmo001/system-bridge-connector", "pr_number": 90, "title": "Bump syrupy from 4.9.1 to 5.0.0", "reason": "ci_not_attributable"}
+{"case_id": "tmq247/tram3#5", "repo": "tmq247/tram3", "pr_number": 5, "title": "Bump python-telegram-bot from 22.4 to 22.5", "reason": "closed_without_ci_signal"}
+{"case_id": "toghrul-nasirli/yente#6", "repo": "toghrul-nasirli/yente", "pr_number": 6, "title": "build(deps): bump cryptography from 46.0.2 to 46.0.3", "reason": "no_supported_lockfile"}
+{"case_id": "trallnag/prometheus-fastapi-instrumentator#348", "repo": "trallnag/prometheus-fastapi-instrumentator", "pr_number": 348, "title": "build(deps-dev): bump fastapi from 0.110.3 to 0.118.0", "reason": "parse_mismatch"}
+{"case_id": "trallnag/prometheus-fastapi-instrumentator#349", "repo": "trallnag/prometheus-fastapi-instrumentator", "pr_number": 349, "title": "build(deps-dev): bump httpx from 0.23.3 to 0.28.1", "reason": "parse_mismatch"}
+{"case_id": "transbiz-co/python-amazon-ad-api#4", "repo": "transbiz-co/python-amazon-ad-api", "pr_number": 4, "title": "DEP(deps): Update confuse requirement from ~=2.0.1 to ~=2.1.0", "reason": "not_single_package"}
+{"case_id": "troykelly/live-news-break#252", "repo": "troykelly/live-news-break", "pr_number": 252, "title": "Bump the python-packages group across 1 directory with 21 updates", "reason": "group_bump"}
+{"case_id": "tykling/certgrinder#879", "repo": "tykling/certgrinder", "pr_number": 879, "title": "Bump pyyaml from 6.0.1 to 6.0.3 in /server", "reason": "no_supported_lockfile"}
+{"case_id": "tykling/certgrinder#880", "repo": "tykling/certgrinder", "pr_number": 880, "title": "Bump pyyaml from 6.0.1 to 6.0.3 in /client", "reason": "no_supported_lockfile"}
+{"case_id": "tykling/certgrinder#890", "repo": "tykling/certgrinder", "pr_number": 890, "title": "Bump cryptography from 44.0.3 to 46.0.3 in /server", "reason": "no_supported_lockfile"}
+{"case_id": "tykling/certgrinder#891", "repo": "tykling/certgrinder", "pr_number": 891, "title": "Bump cryptography from 44.0.3 to 46.0.3 in /client", "reason": "no_supported_lockfile"}
+{"case_id": "tykling/certgrinder#900", "repo": "tykling/certgrinder", "pr_number": 900, "title": "Bump pydantic-settings from 2.6.0 to 2.12.0 in /server", "reason": "no_supported_lockfile"}
+{"case_id": "tykling/certgrinder#901", "repo": "tykling/certgrinder", "pr_number": 901, "title": "Bump pydantic-settings from 2.6.0 to 2.12.0 in /client", "reason": "no_supported_lockfile"}
+{"case_id": "tykling/dns_exporter#206", "repo": "tykling/dns_exporter", "pr_number": 206, "title": "Bump coverage[toml] from 7.11.3 to 7.12.0", "reason": "no_supported_lockfile"}
+{"case_id": "tykling/dns_exporter#207", "repo": "tykling/dns_exporter", "pr_number": 207, "title": "Bump pre-commit from 4.4.0 to 4.5.0", "reason": "no_supported_lockfile"}
+{"case_id": "udiram/Glioblastoma_analysis#883", "repo": "udiram/Glioblastoma_analysis", "pr_number": 883, "title": "Bump cryptography from 44.0.1 to 46.0.3", "reason": "closed_without_ci_signal"}
+{"case_id": "user111192/picktorch#11", "repo": "user111192/picktorch", "pr_number": 11, "title": "build(deps): bump rich from 13.9.4 to 14.2.0", "reason": "closed_without_ci_signal"}
+{"case_id": "username-gigo-is-not-available/undergraduate-study-programs-preprocessor#17", "repo": "username-gigo-is-not-available/undergraduate-study-programs-preprocessor", "pr_number": 17, "title": "Bump pandas from 2.3.1 to 2.3.3", "reason": "closed_without_ci_signal"}
+{"case_id": "vidangg/mozilla#223", "repo": "vidangg/mozilla", "pr_number": 223, "title": "Bump pycparser from 2.22 to 2.23 in /requirements", "reason": "no_supported_lockfile"}
+{"case_id": "vidangg/mozilla#255", "repo": "vidangg/mozilla", "pr_number": 255, "title": "Bump wcwidth from 0.2.13 to 0.2.14 in /requirements", "reason": "no_supported_lockfile"}
+{"case_id": "vidangg/mozilla#295", "repo": "vidangg/mozilla", "pr_number": 295, "title": "Bump rich from 14.0.0 to 14.2.0 in /requirements", "reason": "no_supported_lockfile"}
+{"case_id": "vidangg/mozilla#312", "repo": "vidangg/mozilla", "pr_number": 312, "title": "Bump cryptography from 45.0.4 to 46.0.3 in /requirements", "reason": "no_supported_lockfile"}
+{"case_id": "vorausrobotik/voraus-ipc-tools-ansible#20", "repo": "vorausrobotik/voraus-ipc-tools-ansible", "pr_number": 20, "title": "chore(deps): Bump ansible-dev-tools from 25.2.1 to 25.8.3", "reason": "no_supported_lockfile"}
+{"case_id": "wayfair-incubator/gbq#555", "repo": "wayfair-incubator/gbq", "pr_number": 555, "title": "Update dependency mkdocs-material to v9.7.1 - autoclosed", "reason": "not_single_package"}
+{"case_id": "wayfair-incubator/gbq#573", "repo": "wayfair-incubator/gbq", "pr_number": 573, "title": "Update dependency mike to v2.1.3 - autoclosed", "reason": "not_single_package"}
+{"case_id": "wayfair-incubator/gbq#575", "repo": "wayfair-incubator/gbq", "pr_number": 575, "title": "Update dependency mkdocstrings to v0.30.1 - autoclosed", "reason": "not_single_package"}
+{"case_id": "wayfair-incubator/gbq#587", "repo": "wayfair-incubator/gbq", "pr_number": 587, "title": "Update dependency ruff to v0.14.14 - autoclosed", "reason": "not_single_package"}
+{"case_id": "wayfair-incubator/gbq#588", "repo": "wayfair-incubator/gbq", "pr_number": 588, "title": "Update dependency bandit to v1.9.3 - autoclosed", "reason": "not_single_package"}
+{"case_id": "wayfair-incubator/pygitops#289", "repo": "wayfair-incubator/pygitops", "pr_number": 289, "title": "Update Python - autoclosed", "reason": "not_single_package"}
+{"case_id": "wayfair-incubator/pygitops#290", "repo": "wayfair-incubator/pygitops", "pr_number": 290, "title": "Update Python (major) - autoclosed", "reason": "not_single_package"}
+{"case_id": "wickimassoy/blinkpy#365", "repo": "wickimassoy/blinkpy", "pr_number": 365, "title": "Bump pytest-sugar from 1.0.0 to 1.1.1", "reason": "closed_without_ci_signal"}
+{"case_id": "wickimassoy/blinkpy#372", "repo": "wickimassoy/blinkpy", "pr_number": 372, "title": "Bump pytest-cov from 6.1.1 to 7.0.0", "reason": "closed_without_ci_signal"}
+{"case_id": "willoughbyrm/ezbench#5", "repo": "willoughbyrm/ezbench", "pr_number": 5, "title": "Configure Renovate", "reason": "not_single_package"}
+{"case_id": "xkayo32/api-brain-agriculture#1", "repo": "xkayo32/api-brain-agriculture", "pr_number": 1, "title": "Bump python-multipart from 0.0.6 to 0.0.18 in /api_python", "reason": "closed_without_ci_signal"}
+{"case_id": "xorima/pandas-merging#1", "repo": "xorima/pandas-merging", "pr_number": 1, "title": "Configure Renovate", "reason": "not_single_package"}
+{"case_id": "xsavuour7/Vasenvolt#2", "repo": "xsavuour7/Vasenvolt", "pr_number": 2, "title": "Bump python-multipart from 0.0.6 to 0.0.18 in /backend", "reason": "parse_mismatch"}
+{"case_id": "xsavuour7/Vasenvolt#3", "repo": "xsavuour7/Vasenvolt", "pr_number": 3, "title": "Bump black from 23.11.0 to 24.3.0 in /backend", "reason": "parse_mismatch"}
+{"case_id": "xsavuour7/Vasenvolt#6", "repo": "xsavuour7/Vasenvolt", "pr_number": 6, "title": "Bump black from 23.11.0 to 24.3.0", "reason": "parse_mismatch"}
+{"case_id": "zk-wraithbg67/pyseto#3", "repo": "zk-wraithbg67/pyseto", "pr_number": 3, "title": "Bump cryptography from 46.0.1 to 46.0.3", "reason": "closed_without_ci_signal"}
+{"case_id": "zxcvbx12345/tech#26", "repo": "zxcvbx12345/tech", "pr_number": 26, "title": "chore(deps-dev): bump syrupy from 4.9.1 to 5.0.0", "reason": "closed_without_ci_signal"}

@@ -1,6 +1,9 @@
 """Minimal GitHub REST client with throttling and an on-disk response cache.
 
-The client never logs the token, never writes it to the cache, and never
+The GitHub token is sent only over HTTPS to api.github.com and
+codeload.github.com. Requests to raw.githubusercontent.com and pypi.org are
+unauthenticated; private-repo reads must use the authenticated GitHub API
+hosts. The client never logs the token, never writes it to the cache, and never
 sends it to redirect targets. All sleeps and the transport are injectable so
 tests run offline and without real delays.
 """

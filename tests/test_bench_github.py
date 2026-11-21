@@ -485,6 +485,49 @@ def test_authorization_is_limited_to_api_and_codeload_hosts(tmp_path: Path) -> N
     assert recorder.calls[2]["headers"]["Authorization"] == "Bearer super-secret-token"
 
 
+def test_inspect_fetch_hosts_have_no_authorization(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api = "https://api.github.com/repos/o/r"
+    raw = "https://raw.githubusercontent.com/o/r/main/requirements.txt"
+    pypi = "https://pypi.org/pypi/requests/2.32.0/json"
+    recorder = Recorder({api: _json({}), raw: _json({})})
+    client = _client(recorder, tmp_path, token="super-secret-token")
+
+    captured: list[tuple[str, dict[str, str]]] = []
+
+    class _Response:
+        def __init__(self, body: bytes) -> None:
+            self._body = body
+
+        def read(self) -> bytes:
+            return self._body
+
+        def __enter__(self) -> _Response:
+            return self
+
+        def __exit__(self, *exc: object) -> bool:
+            return False
+
+    def fake_urlopen(
+        request: urllib.request.Request, timeout: float | None = None, **kwargs: object
+    ) -> _Response:
+        captured.append((request.full_url, dict(request.header_items())))
+        return _Response(b'{"info": {}}')
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    client.get_json(api)
+    client.get_bytes(raw)
+    client.get_external_bytes(pypi)
+
+    assert recorder.calls[0]["headers"]["Authorization"] == "Bearer super-secret-token"
+    assert "Authorization" not in recorder.calls[1]["headers"]
+    assert captured[0][0] == pypi
+    assert "authorization" not in {name.lower() for name in captured[0][1]}
+    assert all("super-secret-token" not in value for value in captured[0][1].values())
+
+
 def test_download_strips_authorization_on_every_redirect(tmp_path: Path) -> None:
     api = "https://api.github.com/repos/o/r/tarball/abc"
     codeload = "https://codeload.github.com/o/r/tar.gz/abc"

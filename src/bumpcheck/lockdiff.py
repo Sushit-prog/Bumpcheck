@@ -181,6 +181,15 @@ _EXTRACTORS = {
 }
 
 
+def extract_pinned_versions(text: str, kind: str) -> dict[str, list[str]]:
+    """Return pinned versions by canonical package name using the lockfile parser."""
+    extractor = _EXTRACTORS.get(kind)
+    if extractor is None:
+        supported = ", ".join(SUPPORTED_KINDS)
+        raise LockParseError(f"Unknown lockfile kind {kind!r}; expected one of: {supported}")
+    return dict(extractor(_normalize_text(text), kind).versions)
+
+
 def parse_lock_pair(old_text: str, new_text: str, kind: str) -> ParseResult:
     """Compare two lockfile contents and return the changed packages."""
     extractor = _EXTRACTORS.get(kind)
