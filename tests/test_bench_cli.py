@@ -31,13 +31,15 @@ def _candidate() -> dict[str, object]:
     }
 
 
-def _label(case_id: str, label: str) -> dict[str, object]:
-    return {
+def _label(case_id: str, label: str, **overrides: object) -> dict[str, object]:
+    payload: dict[str, object] = {
         "case_id": case_id,
         "round": 1,
         "label": label,
         "labeled_on": "2026-01-01",
     }
+    payload.update(overrides)
+    return payload
 
 
 def _base(tmp_path: Path, *, labels: list[dict[str, object]] | None = None) -> Path:
@@ -156,6 +158,120 @@ def test_bench_label_ambiguous_shorthand_exits_two_and_keeps_store(tmp_path: Pat
     assert "ambiguous case id 'widgets#1'" in result.output
     assert "a/widgets#1" in result.output and "b/widgets#1" in result.output
     assert labels_path.read_bytes() == before
+
+
+def test_bench_label_relabel_full_id_replaces_existing_label(tmp_path: Path) -> None:
+    old = _label(
+        "owner/repo#1",
+        "EXCLUDE",
+        exclude_reason="superseded",
+        evidence="wrong case",
+        notes="old note",
+    )
+    directory = _base(tmp_path, labels=[old])
+
+    result = runner.invoke(
+        app,
+        ["bench", "label", "--dir", str(directory), "--case", "owner/repo#1", "--relabel"],
+        input="x\npreexisting_failure\ncorrect evidence\n\n",
+    )
+
+    assert result.exit_code == 0, result.output
+    stored = load_labels(directory / "labels.jsonl")
+    label = stored[("owner/repo#1", 1)]
+    assert label.exclude_reason == "preexisting_failure"
+    assert label.evidence == "correct evidence"
+    assert label.labeled_on == date.today()
+    assert "replaced previous label: EXCLUDE exclude_reason=superseded" in result.output
+    history = json.loads(
+        (directory / "labels.history.jsonl").read_text(encoding="utf-8").splitlines()[0]
+    )
+    assert history["previous"]["evidence"] == "wrong case"
+
+
+def test_bench_label_relabel_shorthand_replaces_existing_label(tmp_path: Path) -> None:
+    old = _label("owner/repo#1", "EXCLUDE", exclude_reason="superseded", evidence="wrong case")
+    directory = _base(tmp_path, labels=[old])
+
+    result = runner.invoke(
+        app,
+        ["bench", "label", "--dir", str(directory), "--case", "repo#1", "--relabel"],
+        input="x\npreexisting_failure\ncorrect evidence\n\n",
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "saved EXCLUDE for owner/repo#1" in result.output
+    label = load_labels(directory / "labels.jsonl")[("owner/repo#1", 1)]
+    assert label.exclude_reason == "preexisting_failure"
+    history = json.loads(
+        (directory / "labels.history.jsonl").read_text(encoding="utf-8").splitlines()[0]
+    )
+    assert history["previous"]["exclude_reason"] == "superseded"
+
+
+def test_bench_label_relabel_without_case_exits_two(tmp_path: Path) -> None:
+    directory = _base(tmp_path)
+    labels_path = directory / "labels.jsonl"
+    before = labels_path.read_bytes()
+
+    result = runner.invoke(
+        app,
+        ["bench", "label", "--dir", str(directory), "--relabel"],
+        input="q\n",
+    )
+
+    assert result.exit_code == 2
+    assert "--relabel requires at least one --case" in result.output
+    assert labels_path.read_bytes() == before
+    assert not (directory / "labels.history.jsonl").exists()
+
+
+def test_bench_label_relabel_rejects_incompatible_options(tmp_path: Path) -> None:
+    directory = _base(tmp_path, labels=[_label("owner/repo#1", "OK")])
+    labels_path = directory / "labels.jsonl"
+    before = labels_path.read_bytes()
+    incompatible = [
+        ["--sample", "1.0"],
+        ["--only", "OK_SUSPECT"],
+        ["--also-dir", str(directory)],
+    ]
+
+    for extra in incompatible:
+        result = runner.invoke(
+            app,
+            [
+                "bench",
+                "label",
+                "--dir",
+                str(directory),
+                "--case",
+                "owner/repo#1",
+                "--relabel",
+                *extra,
+            ],
+            input="q\n",
+        )
+        assert result.exit_code == 2
+        assert "--relabel cannot be combined" in result.output
+
+    assert labels_path.read_bytes() == before
+    assert not (directory / "labels.history.jsonl").exists()
+
+
+def test_bench_label_already_labeled_drop_message_has_relabel_hint(tmp_path: Path) -> None:
+    directory = _base(tmp_path, labels=[_label("owner/repo#1", "OK")])
+
+    result = runner.invoke(
+        app,
+        ["bench", "label", "--dir", str(directory), "--case", "owner/repo#1"],
+        input="q\n",
+    )
+
+    assert result.exit_code == 0, result.output
+    assert (
+        "owner/repo#1 (already labeled this round; use --relabel with --case to replace it)"
+        in result.output
+    )
 
 
 def test_bench_label_stats_prints_total_line(tmp_path: Path) -> None:

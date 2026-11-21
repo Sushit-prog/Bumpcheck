@@ -8,7 +8,7 @@ import random
 import sys
 from collections import Counter
 from collections.abc import Callable, Iterable
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal
 
@@ -119,6 +119,58 @@ def _format_validation_error(exc: Exception) -> str:
             prefix = "Value error, "
             return message[len(prefix) :] if message.startswith(prefix) else message
     return str(exc)
+
+
+def _one_line(value: object) -> str:
+    return " ".join(str(value).split()) if value is not None else ""
+
+
+def _label_summary(label: Label) -> str:
+    parts = [label.label]
+    if label.break_category is not None:
+        parts.append(f"break_category={label.break_category}")
+    if label.evidence_kind is not None:
+        parts.append(f"evidence_kind={label.evidence_kind}")
+    if label.exclude_reason is not None:
+        parts.append(f"exclude_reason={label.exclude_reason}")
+    parts.append(f"evidence={_one_line(label.evidence)!r}")
+    parts.append(f"labeled_on={label.labeled_on.isoformat()}")
+    parts.append(f"notes={_one_line(label.notes)!r}")
+    return " ".join(parts)
+
+
+def _format_existing_label(label: Label) -> str:
+    lines = [
+        "existing label (will be replaced if you save a new one):",
+        f"label: {label.label}",
+    ]
+    if label.break_category is not None:
+        lines.append(f"break_category: {label.break_category}")
+    if label.exclude_reason is not None:
+        lines.append(f"exclude_reason: {label.exclude_reason}")
+    if label.evidence_kind is not None:
+        lines.append(f"evidence_kind: {label.evidence_kind}")
+    lines.extend(
+        [
+            f"evidence: {_one_line(label.evidence)}",
+            f"labeled_on: {label.labeled_on.isoformat()}",
+            f"notes: {_one_line(label.notes)}",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _append_history(path: Path, payload: dict[str, Any], output: Callable[[str], None]) -> None:
+    try:
+        with path.open("a", encoding="utf-8", newline="\n") as handle:
+            handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+            handle.flush()
+    except OSError as exc:
+        output(f"warning: could not append label history to {path.name}: {exc}")
 
 
 def load_labels(path: Path) -> dict[tuple[str, int], Label]:
@@ -253,9 +305,14 @@ def select_cases(
     also_labeled: set[str] | None = None,
     round1_label: str | None = None,
     requested_ids: list[str] | None = None,
+    relabel: bool = False,
 ) -> list[str]:
     """Choose the unlabeled case_ids for a round, deterministically sorted."""
     resolved_ids = resolve_case_ids(candidates, requested_ids)
+    if relabel and not requested_ids:
+        raise ValueError("--relabel requires at least one --case")
+    if relabel and (sample is not None or only is not None or also_labeled):
+        raise ValueError("--relabel cannot be combined with --sample, --only, or --also-dir")
     if round < 1:
         raise ValueError("round must be one or greater")
     if round1_label is not None and round < 2:
@@ -269,7 +326,10 @@ def select_cases(
     prior = {
         case_id: label.label for (case_id, label_round), label in labels.items() if label_round == 1
     }
-    case_ids = set(candidates) - labeled_this_round
+    if relabel and requested_ids is not None:
+        case_ids = set(candidates)
+    else:
+        case_ids = set(candidates) - labeled_this_round
     if round >= 2:
         case_ids &= {case_id for case_id, value in prior.items() if value in {"BROKE", "OK"}}
         if round1_label is not None:
@@ -462,13 +522,19 @@ def run_label_loop(
     also_dirs: list[Path] | None = None,
     round1_label: str | None = None,
     requested_ids: list[str] | None = None,
+    relabel: bool = False,
     input_fn: Callable[[str], str] = input,
     output: Callable[[str], None] = _default_output,
     today: Callable[[], date] = date.today,
 ) -> int:
     """Run the interactive labelling loop; all I/O is injectable."""
+    if relabel and not requested_ids:
+        raise ValueError("--relabel requires at least one --case")
+    if relabel and (sample is not None or only is not None or also_dirs):
+        raise ValueError("--relabel cannot be combined with --sample, --only, or --also-dir")
     candidates = load_candidates(directory / "candidates.jsonl")
     labels_path = directory / "labels.jsonl"
+    history_path = labels_path.with_name("labels.history.jsonl")
     labels = load_labels(labels_path)
     also_labeled = collect_also_labeled(also_dirs, round)
     resolved_ids = resolve_case_ids(candidates, requested_ids)
@@ -482,6 +548,7 @@ def run_label_loop(
         also_labeled=also_labeled,
         round1_label=round1_label,
         requested_ids=resolved_ids if requested_ids is not None else None,
+        relabel=relabel,
     )
     output(f"labeling round {round}: {len(case_ids)} case(s)")
     if requested_ids is not None:
@@ -491,20 +558,28 @@ def run_label_loop(
                 continue
             reason = "not selected for this round"
             if (case_id, round) in labels:
-                reason = "already labeled this round"
+                reason = (
+                    "not selected for this round"
+                    if relabel
+                    else "already labeled this round; use --relabel with --case to replace it"
+                )
             elif only is not None and candidates[case_id].get("label_suggestion") != only:
                 reason = f"dropped by --only {only}"
             elif also_labeled and case_id in also_labeled:
                 reason = "dropped by --also-dir"
             dropped.append(f"{case_id} ({reason})")
         output(f"requested cases dropped: {', '.join(dropped) if dropped else 'none'}")
-    saved: list[tuple[tuple[str, int], Label | None, Label]] = []
+    saved: list[tuple[tuple[str, int], Label | None, Label, bool]] = []
     skipped_ids: list[str] = []
     labeled = skipped = undone = 0
 
     try:
         for case_id in case_ids:
             candidate = candidates[case_id]
+            existing = labels.get((case_id, round)) if relabel else None
+            if existing is not None:
+                output(_format_existing_label(existing))
+                output("")
             output("")
             output(format_case(candidate, show_suggestion=show_suggestion, today=today))
             try:
@@ -528,13 +603,29 @@ def run_label_loop(
                     if not saved:
                         output("nothing to undo in this session")
                         continue
-                    key, previous, saved_label = saved.pop()
+                    key, previous, saved_label, was_replacement = saved.pop()
                     labels, applied = undo_label(
                         labels_path, labels, key, previous, expected=saved_label
                     )
                     if applied:
                         undone += 1
                         output(f"undid label for {key[0]}")
+                        if was_replacement:
+                            _append_history(
+                                history_path,
+                                {
+                                    "undone_relabel": True,
+                                    "replaced_on": _utc_now(),
+                                    "replaced_by_round": key[1],
+                                    "removed": saved_label.model_dump(mode="json"),
+                                    "restored": (
+                                        previous.model_dump(mode="json")
+                                        if previous is not None
+                                        else None
+                                    ),
+                                },
+                                output,
+                            )
                     else:
                         output(
                             f"undo skipped: {key[0]} was changed by another session; "
@@ -561,9 +652,24 @@ def run_label_loop(
                 continue
             key = (label.case_id, label.round)
             labels, previous = save_label(labels_path, label, labels)
-            saved.append((key, previous, label))
+            previous_record = previous
+            was_replacement = previous_record is not None
+            saved.append((key, previous_record, label, was_replacement))
+            if previous_record is not None:
+                _append_history(
+                    history_path,
+                    {
+                        "replaced_on": _utc_now(),
+                        "replaced_by_round": round,
+                        "previous": previous_record.model_dump(mode="json"),
+                        "replacement_summary": _label_summary(label),
+                    },
+                    output,
+                )
             labeled += 1
             output(f"saved {label.label} for {case_id}")
+            if previous_record is not None:
+                output(f"replaced previous label: {_label_summary(previous_record)}")
     except KeyboardInterrupt:
         output("interrupted")
     skipped_text = ", ".join(skipped_ids) if skipped_ids else "none"

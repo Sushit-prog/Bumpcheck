@@ -324,7 +324,10 @@ def test_requested_cases_dropped_are_reported(tmp_path: Path) -> None:
     )
     text = _text(output)
     assert "acme/widgets#2 (dropped by --only OK_SUSPECT)" in text
-    assert "acme/widgets#3 (already labeled this round)" in text
+    assert (
+        "acme/widgets#3 (already labeled this round; use --relabel with --case to replace it)"
+        in text
+    )
 
 
 def test_shorthand_resolves_and_only_dropped_id_is_reported(tmp_path: Path) -> None:
@@ -340,7 +343,10 @@ def test_shorthand_resolves_and_only_dropped_id_is_reported(tmp_path: Path) -> N
         requested_ids=["widgets#1", "acme/widgets#3"],
     )
     text = _text(output)
-    assert "requested cases dropped: acme/widgets#3 (already labeled this round)" in text
+    assert (
+        "requested cases dropped: acme/widgets#3 "
+        "(already labeled this round; use --relabel with --case to replace it)"
+    ) in text
     assert "widgets#1 (" not in text
     stored = load_labels(directory / "labels.jsonl")
     assert stored[("acme/widgets#1", 1)].label == "BROKE"
@@ -761,3 +767,234 @@ def test_pypi_metadata_is_offered_in_the_broke_prompt(tmp_path: Path) -> None:
     assert any("pypi_metadata" in prompt for prompt in script.prompts)
     stored = load_labels(directory / "labels.jsonl")[("acme/widgets#1", 1)]
     assert stored.evidence_kind == "pypi_metadata"
+
+
+def test_relabel_replaces_existing_label_and_preserves_other_records(tmp_path: Path) -> None:
+    old = _label(
+        "acme/widgets#1",
+        1,
+        "EXCLUDE",
+        exclude_reason="superseded",
+        evidence="wrong case",
+        notes="old note",
+    )
+    other = _label("acme/widgets#2", 1, "OK", notes="keep me")
+    directory = _setup(
+        tmp_path,
+        [_candidate("acme/widgets#1"), _candidate("acme/widgets#2", pr_number=2)],
+        [old, other],
+    )
+    labels_path = directory / "labels.jsonl"
+    before = labels_path.read_text(encoding="utf-8").splitlines()
+
+    output, _ = _run_loop(
+        directory,
+        ["x", "preexisting_failure", "correct evidence", ""],
+        requested_ids=["acme/widgets#1"],
+        relabel=True,
+    )
+
+    after = labels_path.read_text(encoding="utf-8").splitlines()
+    stored = load_labels(labels_path)
+    assert len(stored) == 2
+    replacement = stored[("acme/widgets#1", 1)]
+    assert replacement.label == "EXCLUDE"
+    assert replacement.exclude_reason == "preexisting_failure"
+    assert replacement.evidence == "correct evidence"
+    assert replacement.labeled_on == FIXED
+    assert stored[("acme/widgets#2", 1)] == other
+    before_other = next(line for line in before if "acme/widgets#2" in line)
+    after_other = next(line for line in after if "acme/widgets#2" in line)
+    assert before_other == after_other
+    assert "replaced previous label: EXCLUDE exclude_reason=superseded" in _text(output)
+
+
+def test_relabel_history_line_has_exact_old_record(tmp_path: Path) -> None:
+    old = _label(
+        "acme/widgets#1",
+        1,
+        "EXCLUDE",
+        exclude_reason="superseded",
+        evidence="wrong case",
+        notes="old note",
+    )
+    directory = _setup(tmp_path, [_candidate()], [old])
+    labels_path = directory / "labels.jsonl"
+    old_line = next(
+        line for line in labels_path.read_text(encoding="utf-8").splitlines() if "widgets#1" in line
+    )
+
+    _run_loop(
+        directory,
+        ["x", "preexisting_failure", "correct evidence", ""],
+        requested_ids=["acme/widgets#1"],
+        relabel=True,
+    )
+
+    history = (directory / "labels.history.jsonl").read_text(encoding="utf-8").splitlines()
+    assert len(history) == 1
+    entry = json.loads(history[0])
+    assert entry["previous"] == json.loads(old_line)
+    assert entry["replaced_by_round"] == 1
+    assert "preexisting_failure" in entry["replacement_summary"]
+    assert entry["replaced_on"]
+
+
+def test_relabel_prints_existing_label_before_prompt(tmp_path: Path) -> None:
+    old = _label(
+        "acme/widgets#1",
+        1,
+        "BROKE",
+        break_category="api_break",
+        evidence_kind="log_names_package",
+        evidence="old evidence",
+        notes="old note",
+    )
+    directory = _setup(tmp_path, [_candidate()], [old])
+
+    output, _ = _run_loop(directory, ["q"], requested_ids=["acme/widgets#1"], relabel=True)
+
+    text = _text(output)
+    heading = "existing label (will be replaced if you save a new one):"
+    assert heading in text
+    assert "break_category: api_break" in text
+    assert "evidence_kind: log_names_package" in text
+    assert "evidence: old evidence" in text
+    assert "notes: old note" in text
+    assert text.index(heading) < text.index("case: acme/widgets#1")
+    assert load_labels(directory / "labels.jsonl")[("acme/widgets#1", 1)] == old
+
+
+@pytest.mark.parametrize("choice", ["s", "q"])
+def test_relabel_skip_or_quit_leaves_existing_label_unchanged(tmp_path: Path, choice: str) -> None:
+    old = _label(
+        "acme/widgets#1",
+        1,
+        "EXCLUDE",
+        exclude_reason="superseded",
+        evidence="old evidence",
+    )
+    directory = _setup(tmp_path, [_candidate()], [old])
+
+    _run_loop(directory, [choice], requested_ids=["acme/widgets#1"], relabel=True)
+
+    assert load_labels(directory / "labels.jsonl")[("acme/widgets#1", 1)] == old
+    assert not (directory / "labels.history.jsonl").exists()
+
+
+def test_relabel_undo_restores_original_label_and_appends_history(tmp_path: Path) -> None:
+    old = _label(
+        "acme/widgets#1",
+        1,
+        "EXCLUDE",
+        exclude_reason="superseded",
+        evidence="old evidence",
+        notes="old note",
+    )
+    directory = _setup(
+        tmp_path,
+        [_candidate("acme/widgets#1"), _candidate("acme/widgets#2", pr_number=2)],
+        [old],
+    )
+
+    output, _ = _run_loop(
+        directory,
+        ["x", "preexisting_failure", "correct evidence", "", "u", "q"],
+        requested_ids=["acme/widgets#1", "acme/widgets#2"],
+        relabel=True,
+    )
+
+    assert load_labels(directory / "labels.jsonl")[("acme/widgets#1", 1)] == old
+    history = [
+        json.loads(line)
+        for line in (directory / "labels.history.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert len(history) == 2
+    assert "previous" in history[0]
+    assert history[1]["undone_relabel"] is True
+    assert history[1]["removed"]["exclude_reason"] == "preexisting_failure"
+    assert history[1]["restored"] == old.model_dump(mode="json")
+    assert "undid label for acme/widgets#1" in _text(output)
+
+
+@pytest.mark.parametrize(
+    ("kind", "answers"),
+    [
+        ("invalid", ["b", "api_break", "log_names_package", "", "", "q"]),
+        ("cancelled", ["o", "n", "q"]),
+    ],
+)
+def test_relabel_invalid_or_cancelled_answer_leaves_existing_label_unchanged(
+    tmp_path: Path, kind: str, answers: list[str]
+) -> None:
+    old = _label(
+        "acme/widgets#1",
+        1,
+        "EXCLUDE",
+        exclude_reason="superseded",
+        evidence="old evidence",
+    )
+    directory = _setup(tmp_path, [_candidate()], [old])
+
+    output, _ = _run_loop(directory, answers, requested_ids=["acme/widgets#1"], relabel=True)
+
+    assert load_labels(directory / "labels.jsonl")[("acme/widgets#1", 1)] == old
+    assert not (directory / "labels.history.jsonl").exists()
+    assert (
+        ("invalid label" in _text(output))
+        if kind == "invalid"
+        else ("OK label cancelled" in _text(output))
+    )
+
+
+def test_relabel_on_unlabeled_case_behaves_normally_and_writes_no_history(tmp_path: Path) -> None:
+    directory = _setup(tmp_path, [_candidate()])
+
+    _run_loop(
+        directory,
+        ["b", "api_break", "log_names_package", "evidence", "", ""],
+        requested_ids=["acme/widgets#1"],
+        relabel=True,
+    )
+
+    stored = load_labels(directory / "labels.jsonl")[("acme/widgets#1", 1)]
+    assert stored.label == "BROKE"
+    assert stored.evidence == "evidence"
+    assert stored.labeled_on == FIXED
+    assert not (directory / "labels.history.jsonl").exists()
+
+
+def test_already_labeled_drop_message_suggests_relabel(tmp_path: Path) -> None:
+    old = _label("acme/widgets#1", 1, "OK")
+    directory = _setup(tmp_path, [_candidate()], [old])
+
+    output, _ = _run_loop(directory, ["q"], requested_ids=["acme/widgets#1"])
+
+    assert (
+        "acme/widgets#1 (already labeled this round; use --relabel with --case to replace it)"
+        in _text(output)
+    )
+    assert not (directory / "labels.history.jsonl").exists()
+
+
+def test_relabel_history_append_failure_warns_and_keeps_saved_label(tmp_path: Path) -> None:
+    old = _label(
+        "acme/widgets#1",
+        1,
+        "EXCLUDE",
+        exclude_reason="superseded",
+        evidence="old evidence",
+    )
+    directory = _setup(tmp_path, [_candidate()], [old])
+    (directory / "labels.history.jsonl").mkdir()
+
+    output, _ = _run_loop(
+        directory,
+        ["x", "preexisting_failure", "correct evidence", ""],
+        requested_ids=["acme/widgets#1"],
+        relabel=True,
+    )
+
+    assert "warning: could not append label history" in _text(output)
+    stored = load_labels(directory / "labels.jsonl")[("acme/widgets#1", 1)]
+    assert stored.exclude_reason == "preexisting_failure"

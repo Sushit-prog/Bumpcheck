@@ -484,6 +484,11 @@ def bench_label(
         "--case",
         help="Only show this case id; repeatable.",
     ),
+    relabel: bool = typer.Option(
+        False,
+        "--relabel",
+        help="Allow replacing labels for cases already labeled in this round; requires --case.",
+    ),
     sample: float | None = typer.Option(
         None,
         "--sample",
@@ -507,12 +512,23 @@ def bench_label(
     ),
 ) -> None:
     """Hand-label mined candidates as BROKE, OK or EXCLUDE."""
+    if relabel and not case:
+        typer.echo("--relabel requires at least one --case", err=True)
+        raise typer.Exit(code=2)
+    if relabel and (sample is not None or only is not None or also_dir):
+        typer.echo(
+            "--relabel cannot be combined with --sample, --only, or --also-dir; "
+            "those filters would hide or change the meaning of a targeted relabel",
+            err=True,
+        )
+        raise typer.Exit(code=2)
     try:
         code = run_label_loop(
             dir,
             round=round,
             only=only.value if only is not None else None,
             requested_ids=case,
+            relabel=relabel,
             sample=sample,
             seed=seed,
             show_suggestion=show_suggestion,
