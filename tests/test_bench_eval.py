@@ -502,11 +502,12 @@ def test_worker_reads_requires_python_from_snapshot_metadata(tmp_path: Path, mon
 
     result = eval_worker.run_case(worker_payload(root))
 
-    assert result["diagnostics"]["requires_python"] == {
-        "package": "pkg",
-        "old": ">=3.9",
-        "new": ">=3.9",
-    }
+    requires_python = result["diagnostics"]["requires_python"]
+    assert requires_python["package"] == "pkg"
+    assert requires_python["old"] == ">=3.9"
+    assert requires_python["new"] == ">=3.9"
+    assert requires_python["state"] == "available"
+    assert requires_python["project"]["source"] == "unknown"
 
 
 def test_worker_requires_python_null_when_metadata_missing_or_blank(
@@ -522,16 +523,61 @@ def test_worker_requires_python_null_when_metadata_missing_or_blank(
         worker_payload(snapshot_root(tmp_path / "blank", blank_requires_python=True))
     )
 
-    assert missing["diagnostics"]["requires_python"] == {
-        "package": "pkg",
-        "old": None,
-        "new": None,
-    }
-    assert blank["diagnostics"]["requires_python"] == {
-        "package": "pkg",
-        "old": None,
-        "new": None,
-    }
+    missing_requires_python = missing["diagnostics"]["requires_python"]
+    blank_requires_python = blank["diagnostics"]["requires_python"]
+    for diagnostics in (missing_requires_python, blank_requires_python):
+        assert diagnostics["package"] == "pkg"
+        assert diagnostics["old"] is None
+        assert diagnostics["new"] is None
+        assert diagnostics["state"] == "available"
+
+
+def test_worker_persists_requires_python_project_and_excluded_versions(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = snapshot_root(tmp_path)
+    (root / "old" / "metadata.json").write_text(
+        json.dumps({"info": {"requires_python": ">=3.8"}}), encoding="utf-8"
+    )
+    (root / "new" / "metadata.json").write_text(
+        json.dumps({"info": {"requires_python": ">=3.10"}}), encoding="utf-8"
+    )
+    workflow = root / "repo" / ".github" / "workflows" / "ci.yml"
+    workflow.parent.mkdir(parents=True, exist_ok=True)
+    workflow.write_text(
+        """
+jobs:
+  test:
+    strategy:
+      matrix:
+        python-version: ["3.8", "3.9", "3.10"]
+""",
+        encoding="utf-8",
+    )
+    api = make_api([]).model_copy(
+        update={
+            "old_requires_python": ">=3.8",
+            "new_requires_python": ">=3.10",
+        }
+    )
+    verdict = make_verdict(rule_id="R8", verdict="LIKELY_BREAKING")
+    monkeypatch.setattr(
+        eval_worker,
+        "run_check",
+        fake_check((verdict,), apis={id(verdict): api}),
+    )
+
+    result = eval_worker.run_case(worker_payload(root))
+    requires_python = result["diagnostics"]["requires_python"]
+
+    assert requires_python["old"] == ">=3.8"
+    assert requires_python["new"] == ">=3.10"
+    assert requires_python["project"]["source"] == "ci_matrix"
+    assert requires_python["project"]["status"] == "explicit"
+    assert requires_python["project"]["versions"] == ["3.8", "3.9", "3.10"]
+    assert requires_python["assessment"]["tightened"] is True
+    assert "3.8" in requires_python["assessment"]["excluded"]
+    assert "3.9" in requires_python["assessment"]["excluded"]
 
 
 def test_worker_enriches_no_usage_evidence_with_change_kind_and_parameter(

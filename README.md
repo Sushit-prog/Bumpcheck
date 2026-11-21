@@ -106,6 +106,8 @@ traces usages in the repository, and applies the first matching rule:
 | R5 | Any other usage hit matches a change | `REVIEW` |
 | R6 | No matching hits, but a blocking risk exists | `REVIEW` |
 | R7 | No matching hits and no blocking risks | `SAFE` |
+| R8 | `requires_python` tightens support for a project Python version, or cannot be evaluated | `LIKELY_BREAKING` / `REVIEW` / `UNKNOWN` |
+| R9 | R7 would return `SAFE` but no Python files were scanned | `UNKNOWN` |
 | E1 | One bump raised an exception; other bumps still run | `UNKNOWN` |
 
 R4 marks `OBJECT_REMOVED` and `OBJECT_CHANGED_KIND` as `LIKELY_BREAKING`.
@@ -117,6 +119,14 @@ arguments or keyword splats. Other high-severity parameter changes are
 `unparsable_file`; `dynamic_import_unknown_target` alone does not block `SAFE`.
 Overall severity is `LIKELY_BREAKING` > `REVIEW` > `UNKNOWN` > `SAFE`, so any
 `UNKNOWN` bump prevents an overall `SAFE`.
+
+R8 compares old and new `requires_python` over CPython 3.8–3.14. A tightened
+specifier that excludes a concrete CI or `.python-version` version is
+`LIKELY_BREAKING`; one that only narrows a declared `pyproject.toml`/`setup`
+range is `REVIEW`; an unevaluable specifier or unknown project set is `UNKNOWN`.
+Project Python resolution uses CI matrix first, then declared config, then
+`.python-version`. R9 prevents R7 from returning `SAFE` when zero Python files
+were scanned.
 
 ### What SAFE does and does not mean
 

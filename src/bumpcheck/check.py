@@ -8,7 +8,8 @@ from pathlib import Path
 from bumpcheck.apidiff import ApiDiffResult, diff_versions
 from bumpcheck.lockdiff import parse_lock_pair
 from bumpcheck.models import Bump, Unresolved
-from bumpcheck.rules import decide
+from bumpcheck.projectpython import ProjectPythonSet, resolve_project_python
+from bumpcheck.rules import PythonSupportContext, decide
 from bumpcheck.usage import UsageResult, trace_usage
 from bumpcheck.verdict import (
     PIPELINE_VERSION,
@@ -20,6 +21,7 @@ from bumpcheck.verdict import (
 
 DiffFn = Callable[..., ApiDiffResult]
 UsageFn = Callable[..., UsageResult | None]
+ProjectPythonFn = Callable[[Path], ProjectPythonSet]
 BumpDiagnosticHook = Callable[
     [BumpVerdict, ApiDiffResult | None, UsageResult | None],
     None,
@@ -82,12 +84,22 @@ def check(
     *,
     diff_fn: DiffFn = diff_versions,
     usage_fn: UsageFn = trace_usage,
+    project_python_fn: ProjectPythonFn = resolve_project_python,
     cache_dir: Path | None = None,
     on_bump: BumpDiagnosticHook | None = None,
 ) -> CheckResult:
     """Check every bump between two lockfiles and classify the breakage risk."""
     parsed = parse_lock_pair(old_text, new_text, kind)
     warnings: list[str] = list(parsed.warnings)
+    try:
+        project_python = project_python_fn(repo_path)
+    except Exception as exc:
+        project_python = ProjectPythonSet(
+            source="unknown",
+            status="unknown",
+            warnings=(f"project Python resolution failed: {type(exc).__name__}: {exc}",),
+        )
+    warnings.extend(project_python.warnings)
 
     def emit(
         verdict: BumpVerdict,
@@ -129,7 +141,19 @@ def check(
                 )
                 if usage is not None:
                     warnings.extend(usage.warnings)
-            verdict = decide(bump, api, usage)
+            state = (
+                "unavailable"
+                if api.old_requires_python_state == "unavailable"
+                or api.new_requires_python_state == "unavailable"
+                else "available"
+            )
+            python_support = PythonSupportContext(
+                old_requires_python=api.old_requires_python,
+                new_requires_python=api.new_requires_python,
+                state=state,
+                project=project_python,
+            )
+            verdict = decide(bump, api, usage, python_support)
             verdicts.append(verdict)
             emit(verdict, api, usage)
         except Exception as exc:
@@ -155,7 +179,11 @@ def format_text(result: CheckResult) -> str:
             f"{bump.verdict} {bump.package} {old}->{new} [{bump.rule_id}] {bump.rationale}"
         )
         for item in bump.evidence:
-            if item.file is not None and item.line is not None:
-                lines.append(f"  {item.file}:{item.line} {item.summary}")
+            location = (
+                f"{item.file}:{item.line} "
+                if item.file is not None and item.line is not None
+                else ""
+            )
+            lines.append(f"  {location}{item.summary}")
     lines.append(f"overall: {result.overall}")
     return "\n".join(lines)

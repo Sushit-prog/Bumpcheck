@@ -19,6 +19,7 @@ from packaging.utils import canonicalize_name
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from bumpcheck import archive
+from bumpcheck.pycompat import MetadataState
 
 Severity = Literal["high", "medium", "low"]
 Status = Literal["ok", "no_api_diff"]
@@ -44,6 +45,7 @@ _RETRIES = 3
 _RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
 _MAX_TOTAL_BYTES = archive.MAX_EXTRACTED_BYTES
 _WHEEL_MARKER = ".bumpcheck-wheel"
+_METADATA_DIR = "_metadata"
 
 _SEVERITY: dict[str, Severity] = {
     "OBJECT_REMOVED": "high",
@@ -112,6 +114,10 @@ class ApiDiffResult(BaseModel):
     old_wheel: str | None = None
     new_wheel: str | None = None
     warnings: list[str] = Field(default_factory=list)
+    old_requires_python: str | None = None
+    new_requires_python: str | None = None
+    old_requires_python_state: MetadataState = "available"
+    new_requires_python_state: MetadataState = "available"
 
     @field_validator("package")
     @classmethod
@@ -229,25 +235,105 @@ def _unpack(wheel_bytes: bytes, target: Path, parent: Path, wheel_filename: str)
         raise _ApiDiffError(exc.kind, str(exc)) from exc
 
 
+def _metadata_path(cache_dir: Path, name: str, version: str) -> Path:
+    return Path(cache_dir) / _METADATA_DIR / f"{canonicalize_name(name)}__{version}.json"
+
+
+def _read_metadata_sidecar(path: Path) -> tuple[str | None, MetadataState] | None:
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    value = payload.get("requires_python")
+    if isinstance(value, str) and value.strip():
+        return value.strip(), "available"
+    return None, "available"
+
+
+def _write_metadata_sidecar(
+    path: Path,
+    name: str,
+    version: str,
+    requires_python: str | None,
+) -> None:
+    payload = {
+        "package": canonicalize_name(name),
+        "version": version,
+        "requires_python": requires_python,
+    }
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(f"{path.name}.tmp")
+        temporary.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+        temporary.replace(path)
+    except OSError:
+        return
+
+
+def _requires_python_from_metadata(data: dict) -> str | None:
+    info = data.get("info")
+    if isinstance(info, dict):
+        value = info.get("requires_python")
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _append_yanked_warning(
+    data: dict,
+    name: str,
+    version: str,
+    warnings: list[str] | None,
+) -> None:
+    if warnings is None:
+        return
+    info = data.get("info")
+    if isinstance(info, dict) and info.get("yanked"):
+        warnings.append(f"Version {version} of {name} is marked as yanked on PyPI")
+
+
+def _fetch_metadata(
+    fetcher: Fetcher,
+    name: str,
+    version: str,
+) -> tuple[dict, str | None]:
+    metadata_url = _PYPI_JSON_URL.format(name=name, version=version)
+    data = _parse_metadata(_fetch_bytes(fetcher, metadata_url), name, version)
+    return data, _requires_python_from_metadata(data)
+
+
 def get_unpacked(
     name: str,
     version: str,
     cache_dir: Path,
     fetcher: Fetcher,
     warnings: list[str] | None = None,
-) -> Path:
-    """Download and unpack the wheel for ``name`` ``version``, returning its directory."""
+) -> tuple[Path, str | None, MetadataState]:
+    """Download and unpack a wheel, returning its directory and metadata state."""
     target = Path(cache_dir) / canonicalize_name(name) / version
+    metadata_file = _metadata_path(Path(cache_dir), name, version)
+    cached_metadata = _read_metadata_sidecar(metadata_file)
     if target.is_dir() and any(target.iterdir()):
-        return target
+        if cached_metadata is not None:
+            return target, cached_metadata[0], cached_metadata[1]
+        try:
+            data, requires_python = _fetch_metadata(fetcher, name, version)
+        except _ApiDiffError:
+            return target, None, "unavailable"
+        _append_yanked_warning(data, name, version, warnings)
+        _write_metadata_sidecar(metadata_file, name, version, requires_python)
+        return target, requires_python, "available"
 
     parent = target.parent
     parent.mkdir(parents=True, exist_ok=True)
 
-    metadata_url = _PYPI_JSON_URL.format(name=name, version=version)
-    data = _parse_metadata(_fetch_bytes(fetcher, metadata_url), name, version)
-    if warnings is not None and data.get("info", {}).get("yanked"):
-        warnings.append(f"Version {version} of {name} is marked as yanked on PyPI")
+    data, requires_python = _fetch_metadata(fetcher, name, version)
+    _append_yanked_warning(data, name, version, warnings)
+    _write_metadata_sidecar(metadata_file, name, version, requires_python)
 
     entry = _choose_wheel(data.get("urls") or [], name, version)
     wheel_bytes = _fetch_bytes(fetcher, entry["url"])
@@ -259,7 +345,7 @@ def get_unpacked(
         raise _ApiDiffError("hash_mismatch", f"sha256 mismatch for {entry['filename']}")
 
     _unpack(wheel_bytes, target, parent, entry["filename"])
-    return target
+    return target, requires_python, "available"
 
 
 def _read_wheel_name(unpacked_dir: Path) -> str | None:
@@ -489,6 +575,10 @@ def _failure(
     new_wheel: str | None = None,
     top_level: list[str] | None = None,
     compared: list[str] | None = None,
+    old_requires_python: str | None = None,
+    new_requires_python: str | None = None,
+    old_requires_python_state: MetadataState = "available",
+    new_requires_python_state: MetadataState = "available",
 ) -> ApiDiffResult:
     extra = [f"{error.reason}: {error.message}"] if error.message else []
     return ApiDiffResult(
@@ -503,6 +593,10 @@ def _failure(
         old_wheel=old_wheel,
         new_wheel=new_wheel,
         warnings=[*warnings, *extra],
+        old_requires_python=old_requires_python,
+        new_requires_python=new_requires_python,
+        old_requires_python_state=old_requires_python_state,
+        new_requires_python_state=new_requires_python_state,
     )
 
 
@@ -520,18 +614,35 @@ def diff_versions(
     warnings: list[str] = []
 
     try:
-        old_dir = get_unpacked(name, old_version, cache, fetcher, warnings)
+        old_dir, old_requires_python, old_state = get_unpacked(
+            name, old_version, cache, fetcher, warnings
+        )
     except _ApiDiffError as exc:
         return _failure(package, old_version, new_version, exc, warnings=warnings)
     old_wheel = _read_wheel_name(old_dir)
 
     try:
-        new_dir = get_unpacked(name, new_version, cache, fetcher, warnings)
+        new_dir, new_requires_python, new_state = get_unpacked(
+            name, new_version, cache, fetcher, warnings
+        )
     except _ApiDiffError as exc:
         return _failure(
-            package, old_version, new_version, exc, warnings=warnings, old_wheel=old_wheel
+            package,
+            old_version,
+            new_version,
+            exc,
+            warnings=warnings,
+            old_wheel=old_wheel,
+            old_requires_python=old_requires_python,
+            old_requires_python_state=old_state,
         )
     new_wheel = _read_wheel_name(new_dir)
+    metadata_kwargs = {
+        "old_requires_python": old_requires_python,
+        "new_requires_python": new_requires_python,
+        "old_requires_python_state": old_state,
+        "new_requires_python_state": new_state,
+    }
 
     if not _has_python(old_dir) or not _has_python(new_dir):
         error = _ApiDiffError("no_python_sources", "No Python sources in the chosen wheel")
@@ -543,6 +654,7 @@ def diff_versions(
             warnings=warnings,
             old_wheel=old_wheel,
             new_wheel=new_wheel,
+            **metadata_kwargs,
         )
 
     old_top = top_level_modules(old_dir)
@@ -561,6 +673,7 @@ def diff_versions(
             new_wheel=new_wheel,
             top_level=top_level,
             compared=compared,
+            **metadata_kwargs,
         )
 
     try:
@@ -577,6 +690,7 @@ def diff_versions(
             new_wheel=new_wheel,
             top_level=top_level,
             compared=compared,
+            **metadata_kwargs,
         )
     if failures:
         error = _ApiDiffError("unparsable_sources", "Some sources could not be parsed")
@@ -590,6 +704,7 @@ def diff_versions(
             new_wheel=new_wheel,
             top_level=top_level,
             compared=compared,
+            **metadata_kwargs,
         )
 
     try:
@@ -606,6 +721,7 @@ def diff_versions(
             new_wheel=new_wheel,
             top_level=top_level,
             compared=compared,
+            **metadata_kwargs,
         )
 
     changes: list[ApiChange] = []
@@ -626,6 +742,7 @@ def diff_versions(
             new_wheel=new_wheel,
             top_level=top_level,
             compared=compared,
+            **metadata_kwargs,
         )
 
     for top in old_top:
@@ -650,4 +767,5 @@ def diff_versions(
         old_wheel=old_wheel,
         new_wheel=new_wheel,
         warnings=warnings,
+        **metadata_kwargs,
     )

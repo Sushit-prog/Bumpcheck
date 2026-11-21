@@ -12,7 +12,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 import yaml
 from packaging.requirements import InvalidRequirement, Requirement
@@ -29,6 +29,16 @@ from bumpcheck.bench.github import (
 from bumpcheck.bench.labels import load_candidates
 from bumpcheck.bench.mine import FAILURE_CONCLUSIONS
 from bumpcheck.lockdiff import SUPPORTED_KINDS, LockParseError, extract_pinned_versions
+from bumpcheck.projectpython import (
+    VersionScalar,
+    _composed_jobs,
+    _format_version_scalar,
+    _job_matrix_node,
+    _matrix_values,
+    _python_version_values,
+    _scalar_text,
+    _unquoted_float_warning,
+)
 from bumpcheck.pycompat import (
     ConcretePythonVersion,
     NonConcretePythonVersion,
@@ -45,8 +55,6 @@ _RUN_TOOL_RE = re.compile(
 )
 _URL_QUERY_RE = re.compile(r"(https?://[^\s?#]+)\?[^\s]*")
 _CREDENTIAL_RE = re.compile(r"(https?://)[^/\s:@]+:[^/\s@]+@")
-_MATRIX_EXPRESSION_RE = re.compile(r"\$\{\{\s*matrix\.([A-Za-z0-9_-]+)\s*\}\}")
-_PLAIN_FLOAT_RE = re.compile(r"(\d+)\.(\d+)")
 _CHECK_TOKEN_RE = re.compile(r"[^()\[\]\s]+")
 _VERSION_LIKE_RE = re.compile(
     r"(?<![\d.])(\d+(?:\.(?:\d+|[xX*])){1,2}(?:t|-dev)?)(?![\d.])",
@@ -56,14 +64,6 @@ _STRICT_PYTHON_TOKEN_RE = re.compile(
     r"(?:3\.(?:[0-9]|[1-9][0-9])|2\.7)(?:t|-dev)?\Z",
     re.IGNORECASE,
 )
-_VERSION_KEYS = frozenset({"python-version", "python-version-file"})
-
-
-@dataclass(frozen=True)
-class VersionScalar:
-    raw: str
-    style: str | None
-    source: Literal["version", "file"] = "version"
 
 
 @dataclass(frozen=True)
@@ -285,141 +285,6 @@ def _workflow_triggers(document: dict[str, Any]) -> tuple[str, ...]:
     if isinstance(raw, dict):
         return tuple(sorted(str(key) for key in raw))
     return (str(raw),)
-
-
-def _normalize_key(value: object) -> str:
-    return str(value).strip().lower().replace("_", "-")
-
-
-def _raw_scalars(
-    node: yaml.Node,
-    source: Literal["version", "file"] = "version",
-) -> tuple[VersionScalar, ...]:
-    scalars: list[VersionScalar] = []
-
-    def collect(current: yaml.Node) -> None:
-        if isinstance(current, yaml.ScalarNode):
-            scalars.append(VersionScalar(raw=current.value, style=current.style, source=source))
-        elif isinstance(current, yaml.SequenceNode):
-            for item in current.value:
-                collect(item)
-        elif isinstance(current, yaml.MappingNode):
-            for _, item in current.value:
-                collect(item)
-
-    collect(node)
-    return tuple(dict.fromkeys(scalars))
-
-
-def _matrix_values(matrix: yaml.Node) -> dict[str, tuple[VersionScalar, ...]]:
-    values: dict[str, list[VersionScalar]] = {}
-
-    def add(key_node: yaml.Node, value_node: yaml.Node) -> None:
-        if not isinstance(key_node, yaml.ScalarNode):
-            return
-        key = _normalize_key(key_node.value)
-        values.setdefault(key, []).extend(_raw_scalars(value_node))
-
-    def add_mapping(mapping: yaml.MappingNode) -> None:
-        for key, value in mapping.value:
-            if isinstance(key, yaml.ScalarNode) and key.value == "<<":
-                if isinstance(value, yaml.MappingNode):
-                    add_mapping(value)
-                elif isinstance(value, yaml.SequenceNode):
-                    for item in value.value:
-                        if isinstance(item, yaml.MappingNode):
-                            add_mapping(item)
-                continue
-            add(key, value)
-
-    if isinstance(matrix, yaml.MappingNode):
-        for key, value in matrix.value:
-            normalized = _normalize_key(key.value) if isinstance(key, yaml.ScalarNode) else ""
-            if normalized == "include" and isinstance(value, yaml.SequenceNode):
-                for item in value.value:
-                    if isinstance(item, yaml.MappingNode):
-                        add_mapping(item)
-            else:
-                add(key, value)
-    return {key: tuple(dict.fromkeys(items)) for key, items in values.items()}
-
-
-def _resolve_matrix_expression(
-    node: yaml.Node,
-    matrix_values: dict[str, tuple[VersionScalar, ...]],
-) -> tuple[VersionScalar, ...] | None:
-    scalars = _raw_scalars(node)
-    if len(scalars) != 1:
-        return None
-    match = _MATRIX_EXPRESSION_RE.fullmatch(scalars[0].raw)
-    if match is None:
-        return None
-    return matrix_values.get(_normalize_key(match.group(1))) or None
-
-
-def _python_version_values(
-    job_node: yaml.Node,
-    matrix_values: dict[str, tuple[VersionScalar, ...]],
-) -> tuple[VersionScalar, ...]:
-    scalars: list[VersionScalar] = []
-
-    def visit(current: yaml.Node, in_matrix: bool) -> None:
-        if isinstance(current, yaml.SequenceNode):
-            for item in current.value:
-                visit(item, in_matrix)
-            return
-        if not isinstance(current, yaml.MappingNode):
-            return
-        for key, value in current.value:
-            if not isinstance(key, yaml.ScalarNode):
-                visit(value, in_matrix)
-                continue
-            normalized = _normalize_key(key.value)
-            if normalized in _VERSION_KEYS:
-                source = "file" if normalized == "python-version-file" else "version"
-                resolved = (
-                    _resolve_matrix_expression(value, matrix_values)
-                    if source == "version" and not in_matrix
-                    else None
-                )
-                scalars.extend(resolved if resolved is not None else _raw_scalars(value, source))
-                continue
-            visit(value, in_matrix or normalized == "matrix")
-
-    visit(job_node, False)
-    return tuple(dict.fromkeys(scalars))
-
-
-def _job_matrix_node(job_node: yaml.Node) -> yaml.Node | None:
-    if not isinstance(job_node, yaml.MappingNode):
-        return None
-    for key, value in job_node.value:
-        if not isinstance(key, yaml.ScalarNode) or _normalize_key(key.value) != "strategy":
-            continue
-        if not isinstance(value, yaml.MappingNode):
-            continue
-        for strategy_key, strategy_value in value.value:
-            if (
-                isinstance(strategy_key, yaml.ScalarNode)
-                and _normalize_key(strategy_key.value) == "matrix"
-            ):
-                return strategy_value
-    return None
-
-
-def _composed_jobs(root: yaml.Node | None) -> dict[str, yaml.Node]:
-    if not isinstance(root, yaml.MappingNode):
-        return {}
-    for key, value in root.value:
-        if not isinstance(key, yaml.ScalarNode) or _normalize_key(key.value) != "jobs":
-            continue
-        if isinstance(value, yaml.MappingNode):
-            return {
-                job_key.value: job_value
-                for job_key, job_value in value.value
-                if isinstance(job_key, yaml.ScalarNode)
-            }
-    return {}
 
 
 def _parse_workflow(path: str, text: str) -> WorkflowFile | None:
@@ -730,37 +595,6 @@ def _pypi_lines(old_info: PypiInfo | None, new_info: PypiInfo | None) -> list[st
         f"  dependency changes: {count} {label} ({len(shown)} shown): " + "; ".join(shown) + more
     )
     return lines
-
-
-def _unquoted_float_warning(scalar: VersionScalar) -> str | None:
-    if scalar.style is not None:
-        return None
-    match = _PLAIN_FLOAT_RE.fullmatch(scalar.raw)
-    if match is None:
-        return None
-    major, minor = match.groups()
-    if not minor.endswith("0"):
-        return None
-    as_float_minor = minor.rstrip("0") or "0"
-    return f"(unquoted: Actions reads this as {major}.{as_float_minor})"
-
-
-def _scalar_text(scalar: VersionScalar) -> str:
-    if scalar.style == '"':
-        return f'"{scalar.raw}"'
-    if scalar.style == "'":
-        return f"'{scalar.raw}'"
-    return scalar.raw
-
-
-def _format_version_scalar(scalar: VersionScalar) -> str:
-    result = interpret_python_version(scalar.raw, source=scalar.source)
-    if isinstance(result, NonConcretePythonVersion):
-        return f"{scalar.raw} (non-concrete)"
-    warning = _unquoted_float_warning(scalar)
-    if warning is not None:
-        return f"{scalar.raw} {warning}"
-    return scalar.raw
 
 
 def _workflow_lines(

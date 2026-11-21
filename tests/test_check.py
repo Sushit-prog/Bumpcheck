@@ -7,11 +7,14 @@ from typing import Any
 import pytest
 from typer.testing import CliRunner
 
+from bumpcheck import check as check_module
 from bumpcheck import cli
 from bumpcheck.apidiff import ApiChange, ApiDiffResult, Location
 from bumpcheck.check import check
 from bumpcheck.cli import app
-from bumpcheck.usage import UsageHit, UsageResult
+from bumpcheck.projectpython import ProjectPythonSet
+from bumpcheck.rules import PythonSupportContext
+from bumpcheck.usage import SkippedFile, UsageHit, UsageResult
 from bumpcheck.verdict import BumpVerdict, CheckResult, Evidence
 
 
@@ -28,6 +31,10 @@ def make_api(
     status: str = "ok",
     reason: str | None = None,
     top_level: list[str] | None = None,
+    old_requires_python: str | None = None,
+    new_requires_python: str | None = None,
+    old_requires_python_state: str = "available",
+    new_requires_python_state: str = "available",
 ) -> ApiDiffResult:
     return ApiDiffResult(
         package=package,
@@ -37,6 +44,10 @@ def make_api(
         reason=reason,
         changes=changes or [],
         top_level=top_level if top_level is not None else [package],
+        old_requires_python=old_requires_python,
+        new_requires_python=new_requires_python,
+        old_requires_python_state=old_requires_python_state,
+        new_requires_python_state=new_requires_python_state,
     )
 
 
@@ -81,6 +92,8 @@ def make_usage(
     *,
     risks: list[str] | None = None,
     package: str = "pkg",
+    files_scanned: int = 1,
+    files_skipped: list[SkippedFile] | None = None,
 ) -> UsageResult:
     collected = hits or []
     symbols = sorted({hit.symbol for hit in collected}) or [f"{package}.Client"]
@@ -88,7 +101,8 @@ def make_usage(
         package=package,
         symbols=symbols,
         hits=collected,
-        files_scanned=1,
+        files_scanned=files_scanned,
+        files_skipped=files_skipped or [],
         risks=risks or [],
     )
 
@@ -403,3 +417,101 @@ def test_check_on_bump_receives_partial_diagnostics_on_usage_error(tmp_path: Pat
     assert events[0][0].rule_id == "E1"
     assert events[0][1] is api
     assert events[0][2] is None
+
+
+def test_r2_safe_without_usage_scan_remains_safe(tmp_path: Path) -> None:
+    def fake_usage(*args: object, **kwargs: object) -> UsageResult:
+        raise AssertionError("usage should not run for R2")
+
+    result = check(
+        tmp_path,
+        uv_lock(("pkg", "1.0.0")),
+        uv_lock(("pkg", "1.0.1")),
+        "uv.lock",
+        diff_fn=lambda *args, **kwargs: make_api(),
+        usage_fn=fake_usage,
+    )
+
+    assert result.overall == "SAFE"
+    assert result.bumps[0].rule_id == "R2"
+
+
+def test_r9_zero_files_scanned_r7_is_unknown(tmp_path: Path) -> None:
+    usage = make_usage(
+        files_scanned=0,
+        files_skipped=[SkippedFile(file="app.py", reason="unparsable")],
+    )
+    result = check(
+        tmp_path,
+        uv_lock(("pkg", "1.0.0")),
+        uv_lock(("pkg", "2.0.0")),
+        "uv.lock",
+        diff_fn=lambda *args, **kwargs: make_api(changes=[make_change()]),
+        usage_fn=lambda *args, **kwargs: usage,
+    )
+
+    assert result.overall == "UNKNOWN"
+    assert result.bumps[0].rule_id == "R9"
+
+
+def test_check_passes_python_support_context_to_rules(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api = make_api(
+        old_requires_python=">=3.8",
+        new_requires_python=">=3.10",
+    )
+    project = ProjectPythonSet(
+        source="ci_matrix",
+        status="explicit",
+        versions=("3.8", "3.9", "3.10"),
+    )
+    captured: dict[str, PythonSupportContext | None] = {}
+    original_decide = check_module.decide
+
+    def spy_decide(*args: object, **kwargs: object) -> Any:
+        captured["context"] = args[3] if len(args) > 3 else kwargs.get("python_support")
+        return original_decide(*args, **kwargs)
+
+    monkeypatch.setattr(check_module, "decide", spy_decide)
+
+    result = check(
+        tmp_path,
+        uv_lock(("pkg", "1.0.0")),
+        uv_lock(("pkg", "2.0.0")),
+        "uv.lock",
+        diff_fn=lambda *args, **kwargs: api,
+        usage_fn=lambda *args, **kwargs: make_usage(),
+        project_python_fn=lambda _: project,
+    )
+
+    context = captured["context"]
+    assert context is not None
+    assert context.old_requires_python == ">=3.8"
+    assert context.new_requires_python == ">=3.10"
+    assert context.project is project
+    assert result.bumps[0].rule_id == "R8"
+
+
+def test_check_resolves_project_python_once(tmp_path: Path) -> None:
+    calls = 0
+
+    def project_fn(_: Path) -> ProjectPythonSet:
+        nonlocal calls
+        calls += 1
+        return ProjectPythonSet(source="unknown", status="unknown")
+
+    def fake_diff(package: str, old: str, new: str, cache_dir: Path | None = None):
+        return make_api(package)
+
+    check(
+        tmp_path,
+        uv_lock(("pkg", "1.0.0"), ("other", "1.0.0")),
+        uv_lock(("pkg", "2.0.0"), ("other", "2.0.0")),
+        "uv.lock",
+        diff_fn=fake_diff,
+        usage_fn=lambda *args, **kwargs: make_usage(),
+        project_python_fn=project_fn,
+    )
+
+    assert calls == 1

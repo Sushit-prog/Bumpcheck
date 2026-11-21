@@ -7,6 +7,7 @@ from bumpcheck.pycompat import (
     ConcretePythonVersion,
     NonConcretePythonVersion,
     allows_python,
+    assess_requires_python_change,
     interpret_python_version,
     newly_disallowed,
     normalize_python_version,
@@ -168,3 +169,53 @@ def test_newly_disallowed_empty_for_missing_or_malformed_specs() -> None:
 def test_newly_disallowed_skips_non_concrete_versions() -> None:
     versions = ["junk", "3.x", ">=3.9", "pypy-3.9", "${{ inputs.v }}", "", "3.9"]
     assert newly_disallowed(">=3.8", ">=3.10", versions) == ["3.9"]
+
+
+def test_assess_requires_python_change_detects_tightening() -> None:
+    result = assess_requires_python_change(">=3.8", ">=3.10", ["3.8", "3.9", "3.10"])
+    assert result.decided is True
+    assert result.tightened is True
+    assert result.excluded == ("3.8", "3.9")
+
+
+def test_assess_requires_python_change_loosened_does_not_fire() -> None:
+    result = assess_requires_python_change(">=3.10", ">=3.8", ["3.8", "3.9", "3.10"])
+    assert result.decided is True
+    assert result.tightened is False
+    assert result.excluded == ()
+
+
+def test_assess_requires_python_change_unchanged_does_not_fire() -> None:
+    result = assess_requires_python_change(">=3.9", ">=3.9", ["3.8", "3.9", "3.10"])
+    assert result.decided is True
+    assert result.tightened is False
+
+
+def test_assess_requires_python_change_null_semantics() -> None:
+    both_null = assess_requires_python_change(None, None, ["3.8", "3.9"])
+    assert both_null.decided is True
+    assert both_null.tightened is False
+
+    old_null = assess_requires_python_change(None, ">=3.10", ["3.8", "3.9", "3.10"])
+    assert old_null.tightened is True
+    assert old_null.excluded == ("3.8", "3.9")
+
+    new_null = assess_requires_python_change(">=3.10", None, ["3.8", "3.9", "3.10"])
+    assert new_null.tightened is False
+
+
+def test_assess_requires_python_change_outside_universe_is_evaluated() -> None:
+    result = assess_requires_python_change(">=3.6", ">=3.10", ["3.6", "3.7"])
+    assert result.excluded == ("3.6", "3.7", "3.8", "3.9")
+
+
+def test_assess_requires_python_change_malformed_spec_is_unknown() -> None:
+    result = assess_requires_python_change("oops", ">=3.10", ["3.8"])
+    assert result.decided is False
+    assert any("invalid old" in warning for warning in result.warnings)
+
+
+def test_assess_requires_python_change_unavailable_metadata_is_unknown() -> None:
+    result = assess_requires_python_change(">=3.8", ">=3.10", ["3.8"], state="unavailable")
+    assert result.decided is False
+    assert result.state == "unavailable"

@@ -47,6 +47,20 @@ class NonConcretePythonVersion:
 
 PythonVersionResult = ConcretePythonVersion | NonConcretePythonVersion
 PythonVersionInput = str | Version | PythonVersionResult
+MetadataState = Literal["available", "unavailable"]
+
+CPYTHON_MINORS: tuple[Version, ...] = tuple(Version(f"3.{minor}") for minor in range(8, 15))
+
+
+@dataclass(frozen=True)
+class RequiresPythonAssessment:
+    old: str | None
+    new: str | None
+    state: MetadataState
+    decided: bool
+    tightened: bool
+    excluded: tuple[str, ...]
+    warnings: tuple[str, ...]
 
 
 def interpret_python_version(
@@ -161,3 +175,86 @@ def newly_disallowed(
         if old_ok is True and new_ok is False:
             result.append(str(version))
     return result
+
+
+def _normalized_specifier(value: str | None) -> str | None:
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def _specifier_is_valid(value: str | None) -> bool:
+    if value is None:
+        return True
+    try:
+        SpecifierSet(value)
+    except InvalidSpecifier:
+        return False
+    return True
+
+
+def assess_requires_python_change(
+    old: str | None,
+    new: str | None,
+    versions: Iterable[PythonVersionInput] = (),
+    *,
+    state: MetadataState = "available",
+) -> RequiresPythonAssessment:
+    """Assess whether a requires-python change removes previously allowed versions."""
+    old_spec = _normalized_specifier(old)
+    new_spec = _normalized_specifier(new)
+    warnings: list[str] = []
+
+    if state == "unavailable":
+        warnings.append("requires_python metadata unavailable")
+        return RequiresPythonAssessment(
+            old=old_spec,
+            new=new_spec,
+            state=state,
+            decided=False,
+            tightened=False,
+            excluded=(),
+            warnings=tuple(warnings),
+        )
+
+    if not _specifier_is_valid(old_spec):
+        warnings.append(f"invalid old requires_python specifier: {old_spec}")
+    if not _specifier_is_valid(new_spec):
+        warnings.append(f"invalid new requires_python specifier: {new_spec}")
+    if warnings:
+        return RequiresPythonAssessment(
+            old=old_spec,
+            new=new_spec,
+            state=state,
+            decided=False,
+            tightened=False,
+            excluded=(),
+            warnings=tuple(warnings),
+        )
+
+    candidates = list(CPYTHON_MINORS)
+    for raw in versions:
+        version = _as_version(raw)
+        if version is not None and version not in candidates:
+            candidates.append(version)
+
+    excluded_versions: list[Version] = []
+    for version in candidates:
+        old_ok = True if old_spec is None else allows_python(old_spec, version)
+        new_ok = True if new_spec is None else allows_python(new_spec, version)
+        if old_ok is True and new_ok is False:
+            excluded_versions.append(version)
+
+    excluded = tuple(
+        str(version)
+        for version in sorted(set(excluded_versions), key=lambda item: (item.major, item.minor))
+    )
+    return RequiresPythonAssessment(
+        old=old_spec,
+        new=new_spec,
+        state=state,
+        decided=True,
+        tightened=bool(excluded),
+        excluded=excluded,
+        warnings=tuple(warnings),
+    )

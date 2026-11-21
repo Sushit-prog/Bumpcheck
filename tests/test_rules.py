@@ -6,8 +6,15 @@ import pytest
 
 from bumpcheck.apidiff import ApiChange, ApiDiffResult, Location
 from bumpcheck.models import Bump
-from bumpcheck.rules import decide
-from bumpcheck.usage import UsageHit, UsageResult, match_hit_to_change, trace_usage
+from bumpcheck.projectpython import ProjectPythonSet
+from bumpcheck.rules import PythonSupportContext, decide
+from bumpcheck.usage import (
+    SkippedFile,
+    UsageHit,
+    UsageResult,
+    match_hit_to_change,
+    trace_usage,
+)
 
 PACKAGE = "pkg"
 
@@ -82,6 +89,8 @@ def make_usage(
     *,
     risks: list[str] | None = None,
     package: str = PACKAGE,
+    files_scanned: int = 1,
+    files_skipped: list[SkippedFile] | None = None,
 ) -> UsageResult:
     collected = hits or []
     symbols = sorted({hit.symbol for hit in collected}) or [f"{package}.Client"]
@@ -89,8 +98,32 @@ def make_usage(
         package=package,
         symbols=symbols,
         hits=collected,
-        files_scanned=1,
+        files_scanned=files_scanned,
+        files_skipped=files_skipped or [],
         risks=risks or [],
+    )
+
+
+def make_context(
+    old: str | None,
+    new: str | None,
+    *,
+    state: str = "available",
+    source: str = "ci_matrix",
+    status: str = "explicit",
+    versions: tuple[str, ...] = ("3.8", "3.9", "3.10"),
+    warnings: tuple[str, ...] = (),
+) -> PythonSupportContext:
+    return PythonSupportContext(
+        old_requires_python=old,
+        new_requires_python=new,
+        state=state,
+        project=ProjectPythonSet(
+            source=source,
+            status=status,
+            versions=versions,
+            warnings=warnings,
+        ),
     )
 
 
@@ -326,3 +359,245 @@ def test_match_hit_to_change_reports_relations() -> None:
     assert match_hit_to_change(descendant, "pkg.Client") == "descendant"
     assert match_hit_to_change(ancestor, "pkg.Client.method") == "ancestor_call"
     assert match_hit_to_change(fallback, "pkg.sub.Client") == "fallback"
+
+
+def test_r8_tightened_with_ci_matrix_exclusion_is_likely_breaking() -> None:
+    result = decide(
+        make_bump(),
+        make_api(),
+        make_usage(),
+        make_context(">=3.8", ">=3.10", versions=("3.8", "3.9", "3.10")),
+    )
+    assert result.verdict == "LIKELY_BREAKING"
+    assert result.rule_id == "R8"
+
+
+def test_r8_tightened_with_declared_range_is_review() -> None:
+    result = decide(
+        make_bump(),
+        make_api(),
+        make_usage(),
+        make_context(
+            ">=3.8",
+            ">=3.10",
+            source="pyproject",
+            status="declared",
+            versions=("3.9", "3.10"),
+        ),
+    )
+    assert result.verdict == "REVIEW"
+    assert result.rule_id == "R8"
+
+
+def test_r8_tightened_with_unknown_project_set_is_unknown() -> None:
+    result = decide(
+        make_bump(),
+        make_api(),
+        make_usage(),
+        make_context(">=3.8", ">=3.10", status="unknown", versions=()),
+    )
+    assert result.verdict == "UNKNOWN"
+    assert result.rule_id == "R8"
+
+
+def test_r8_loosened_spec_does_not_fire() -> None:
+    result = decide(
+        make_bump(),
+        make_api(),
+        make_usage(),
+        make_context(">=3.10", ">=3.8"),
+    )
+    assert result.verdict == "SAFE"
+    assert result.rule_id == "R2"
+
+    result = decide(
+        make_bump(),
+        make_api(),
+        make_usage(),
+        make_context(">=3.10", None),
+    )
+    assert result.verdict == "SAFE"
+    assert result.rule_id == "R2"
+
+
+def test_r8_unchanged_spec_does_not_fire() -> None:
+    result = decide(
+        make_bump(),
+        make_api(),
+        make_usage(),
+        make_context(">=3.9", ">=3.9"),
+    )
+    assert result.verdict == "SAFE"
+    assert result.rule_id == "R2"
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "expected_excluded"),
+    [
+        (">=3.8,<3.10", ">=3.10", ("3.8", "3.9")),
+        ("~=3.9", ">=3.10,<4", ("3.9",)),
+        (">=3.8", ">=3.8,<3.12", ("3.12", "3.13", "3.14")),
+    ],
+)
+def test_r8_specifier_edge_cases(old: str, new: str, expected_excluded: tuple[str, ...]) -> None:
+    result = decide(
+        make_bump(),
+        make_api(),
+        make_usage(),
+        make_context(old, new, source="pyproject", status="declared"),
+    )
+    assert result.verdict == "REVIEW"
+    assert result.rule_id == "R8"
+    excluded = next(
+        item.summary for item in result.evidence if item.summary.startswith("excluded Python")
+    )
+    assert excluded == f"excluded Python versions: {', '.join(expected_excluded)}"
+
+
+def test_r8_precedes_r2_safe() -> None:
+    result = decide(
+        make_bump(),
+        make_api(),
+        make_usage(),
+        make_context(">=3.8", ">=3.11"),
+    )
+    assert result.verdict == "LIKELY_BREAKING"
+    assert result.rule_id == "R8"
+
+
+def test_r8_precedes_r7_safe() -> None:
+    result = decide(
+        make_bump(),
+        make_api([make_change("OBJECT_REMOVED", "pkg.Removed")]),
+        make_usage(),
+        make_context(">=3.8", ">=3.10"),
+    )
+    assert result.verdict == "LIKELY_BREAKING"
+    assert result.rule_id == "R8"
+
+
+def test_r8_evidence_includes_specs_source_and_excluded_versions() -> None:
+    result = decide(
+        make_bump(),
+        make_api(),
+        make_usage(),
+        make_context(">=3.8", ">=3.10", versions=("3.8", "3.9")),
+    )
+    summaries = [item.summary for item in result.evidence]
+    assert "requires_python old: >=3.8" in summaries
+    assert "requires_python new: >=3.10" in summaries
+    assert "project Python source: ci_matrix" in summaries
+    assert "excluded Python versions: 3.8, 3.9" in summaries
+
+
+def test_r8_null_requires_python_both_sides_does_not_fire() -> None:
+    result = decide(
+        make_bump(),
+        make_api(),
+        make_usage(),
+        make_context(None, None),
+    )
+    assert result.verdict == "SAFE"
+    assert result.rule_id == "R2"
+
+
+def test_r8_old_null_new_set_is_tightened() -> None:
+    result = decide(
+        make_bump(),
+        make_api(),
+        make_usage(),
+        make_context(None, ">=3.10", versions=("3.8",)),
+    )
+    assert result.verdict == "LIKELY_BREAKING"
+    assert result.rule_id == "R8"
+
+
+def test_r8_new_null_is_loosened() -> None:
+    result = decide(
+        make_bump(),
+        make_api(),
+        make_usage(),
+        make_context(">=3.10", None),
+    )
+    assert result.verdict == "SAFE"
+    assert result.rule_id == "R2"
+
+
+def test_r8_unavailable_metadata_is_unknown() -> None:
+    result = decide(
+        make_bump(),
+        make_api(),
+        make_usage(),
+        make_context(">=3.8", ">=3.10", state="unavailable"),
+    )
+    assert result.verdict == "UNKNOWN"
+    assert result.rule_id == "R8"
+
+
+def test_r8_missing_requires_python_metadata_is_unknown() -> None:
+    result = decide(
+        make_bump(),
+        make_api(),
+        make_usage(),
+        make_context(None, None, state="unavailable"),
+    )
+    assert result.verdict == "UNKNOWN"
+    assert result.rule_id == "R8"
+
+
+def test_r8_likely_breaking_outranks_r5_review() -> None:
+    result = decide(
+        make_bump(),
+        make_api([make_change()]),
+        make_usage([make_hit(confidence="possible")]),
+        make_context(">=3.8", ">=3.10"),
+    )
+    assert result.verdict == "LIKELY_BREAKING"
+    assert result.rule_id == "R8"
+    assert any(item.summary.startswith("requires_python") for item in result.evidence)
+
+
+def test_r8_evidence_attached_when_other_rule_fires() -> None:
+    result = decide(
+        make_bump(),
+        make_api([make_change()]),
+        make_usage([make_hit(confidence="possible")]),
+        make_context(">=3.8", ">=3.10", source="pyproject", status="declared"),
+    )
+    assert result.verdict == "REVIEW"
+    assert result.rule_id == "R5"
+    assert any(item.summary == "requires_python old: >=3.8" for item in result.evidence)
+
+
+def test_r8_python_floor_bump_with_unused_api_changes_is_likely_breaking() -> None:
+    changes = [make_change("OBJECT_REMOVED", f"pkg.Removed{index}") for index in range(3)]
+    result = decide(
+        make_bump(),
+        make_api(changes),
+        make_usage(),
+        make_context(">=3.8", ">=3.10"),
+    )
+    assert result.verdict == "LIKELY_BREAKING"
+    assert result.rule_id == "R8"
+    assert any("3.8" in item.summary for item in result.evidence)
+
+
+def test_r9_zero_files_scanned_r7_is_unknown() -> None:
+    result = decide(
+        make_bump(),
+        make_api([make_change("OBJECT_REMOVED", "pkg.Removed")]),
+        make_usage(
+            files_scanned=0,
+            files_skipped=[SkippedFile(file="app.py", reason="unreadable")],
+        ),
+    )
+    assert result.verdict == "UNKNOWN"
+    assert result.rule_id == "R9"
+    assert any("files_scanned=0" in item.summary for item in result.evidence)
+    assert any("files_skipped=1" in item.summary for item in result.evidence)
+
+
+def test_r2_zero_scan_does_not_trigger_r9() -> None:
+    result = decide(make_bump(), make_api(), make_usage(files_scanned=0))
+    assert result.verdict == "SAFE"
+    assert result.rule_id == "R2"

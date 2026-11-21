@@ -18,6 +18,8 @@ from bumpcheck.baselines import always_safe, semver_rule
 from bumpcheck.bench.snapshot import load_manifest
 from bumpcheck.check import check as run_check
 from bumpcheck.models import Bump
+from bumpcheck.projectpython import resolve_project_python
+from bumpcheck.pycompat import assess_requires_python_change
 from bumpcheck.usage import UsageResult, trace_usage
 
 
@@ -121,6 +123,49 @@ def _snapshot_requires_python(
         if isinstance(value, str) and value.strip():
             result[side] = value.strip()
     return result
+
+
+def _requires_python_diagnostics(
+    manifest: dict[str, Any] | None,
+    root: Path,
+    package: str | None,
+    api: ApiDiffResult | None = None,
+) -> dict[str, Any]:
+    snapshot = _snapshot_requires_python(manifest, root, package)
+    old = snapshot["old"]
+    new = snapshot["new"]
+    state = "available" if manifest is not None else "unavailable"
+    if api is not None:
+        if api.old_requires_python is not None:
+            old = api.old_requires_python
+        if api.new_requires_python is not None:
+            new = api.new_requires_python
+        if (
+            api.old_requires_python_state == "unavailable"
+            or api.new_requires_python_state == "unavailable"
+        ):
+            state = "unavailable"
+    project = resolve_project_python(root / "repo")
+    assessment = assess_requires_python_change(old, new, project.versions, state=state)
+    return {
+        "package": package,
+        "old": old,
+        "new": new,
+        "state": state,
+        "project": {
+            "source": project.source,
+            "status": project.status,
+            "versions": list(project.versions),
+            "declared_spec": project.declared_spec,
+            "warnings": list(project.warnings),
+        },
+        "assessment": {
+            "decided": assessment.decided,
+            "tightened": assessment.tightened,
+            "excluded": list(assessment.excluded),
+            "warnings": list(assessment.warnings),
+        },
+    }
 
 
 def _api_diagnostics(verdict: Any, api: ApiDiffResult | None) -> dict[str, Any]:
@@ -311,8 +356,12 @@ def run_case(payload: dict[str, Any]) -> dict[str, Any]:
             error_kind = None
         fired = sorted({bump.rule_id for bump in check_result.bumps})
         evidence = _build_evidence_refs(check_result.bumps, hook_data)
+        first_api = next(
+            (api for api, _ in hook_data.values() if api is not None),
+            None,
+        )
         diagnostics: dict[str, Any] = {
-            "requires_python": _snapshot_requires_python(manifest, root, package),
+            "requires_python": _requires_python_diagnostics(manifest, root, package, first_api),
             "snapshot": _snapshot_diagnostics(manifest, root),
             "bumps": [],
         }

@@ -58,11 +58,20 @@ def wheel_filename(name: str, version: str) -> str:
 
 
 def metadata(
-    name: str, version: str, filename: str, wheel: bytes, *, yanked: bool = False
+    name: str,
+    version: str,
+    filename: str,
+    wheel: bytes,
+    *,
+    yanked: bool = False,
+    requires_python: str | None = None,
 ) -> bytes:
+    info: dict[str, object] = {"name": name, "version": version, "yanked": yanked}
+    if requires_python is not None:
+        info["requires_python"] = requires_python
     return json.dumps(
         {
-            "info": {"name": name, "version": version, "yanked": yanked},
+            "info": info,
             "urls": [
                 {
                     "filename": filename,
@@ -76,11 +85,23 @@ def metadata(
 
 
 def responses_for(
-    name: str, version: str, wheel: bytes, *, yanked: bool = False
+    name: str,
+    version: str,
+    wheel: bytes,
+    *,
+    yanked: bool = False,
+    requires_python: str | None = None,
 ) -> dict[str, bytes]:
     filename = wheel_filename(name, version)
     return {
-        f"{PYPI}/{name}/{version}/json": metadata(name, version, filename, wheel, yanked=yanked),
+        f"{PYPI}/{name}/{version}/json": metadata(
+            name,
+            version,
+            filename,
+            wheel,
+            yanked=yanked,
+            requires_python=requires_python,
+        ),
         f"{FILES}/{filename}": wheel,
     }
 
@@ -553,3 +574,98 @@ def test_cli_diff_rejects_empty_name(tmp_path: Path) -> None:
     )
 
     assert result.exit_code == 2
+
+
+def test_diff_versions_exposes_requires_python_metadata(tmp_path: Path) -> None:
+    old_wheel = make_wheel("1.0.0", {"pkg/__init__.py": "x = 1\n"})
+    new_wheel = make_wheel("2.0.0", {"pkg/__init__.py": "x = 2\n"})
+    fetcher = FakeFetcher(
+        {
+            **responses_for("pkg", "1.0.0", old_wheel, requires_python=">=3.8"),
+            **responses_for("pkg", "2.0.0", new_wheel, requires_python=">=3.10"),
+        }
+    )
+
+    result = diff_versions("pkg", "1.0.0", "2.0.0", cache_dir=tmp_path / "cache", fetcher=fetcher)
+
+    assert result.status == "ok"
+    assert result.old_requires_python == ">=3.8"
+    assert result.new_requires_python == ">=3.10"
+    assert result.old_requires_python_state == "available"
+    assert result.new_requires_python_state == "available"
+
+
+def test_diff_versions_reuses_cached_requires_python_metadata(tmp_path: Path) -> None:
+    cache = tmp_path / "cache"
+    old_wheel = make_wheel("1.0.0", {"pkg/__init__.py": "x = 1\n"})
+    new_wheel = make_wheel("2.0.0", {"pkg/__init__.py": "x = 2\n"})
+    first = FakeFetcher(
+        {
+            **responses_for("pkg", "1.0.0", old_wheel, requires_python=">=3.8"),
+            **responses_for("pkg", "2.0.0", new_wheel, requires_python=">=3.10"),
+        }
+    )
+    diff_versions("pkg", "1.0.0", "2.0.0", cache_dir=cache, fetcher=first)
+
+    second = FakeFetcher({})
+    result = diff_versions("pkg", "1.0.0", "2.0.0", cache_dir=cache, fetcher=second)
+
+    assert result.status == "ok"
+    assert result.old_requires_python == ">=3.8"
+    assert result.new_requires_python == ">=3.10"
+    assert second.calls == []
+
+
+def test_diff_versions_missing_metadata_yields_none(tmp_path: Path) -> None:
+    old_wheel = make_wheel("1.0.0", {"pkg/__init__.py": "x = 1\n"})
+    new_wheel = make_wheel("2.0.0", {"pkg/__init__.py": "x = 2\n"})
+    fetcher = FakeFetcher(
+        {
+            **responses_for("pkg", "1.0.0", old_wheel),
+            **responses_for("pkg", "2.0.0", new_wheel),
+        }
+    )
+
+    result = diff_versions("pkg", "1.0.0", "2.0.0", cache_dir=tmp_path / "cache", fetcher=fetcher)
+
+    assert result.status == "ok"
+    assert result.old_requires_python is None
+    assert result.new_requires_python is None
+    assert result.old_requires_python_state == "available"
+    assert result.new_requires_python_state == "available"
+
+
+def test_apidiff_cache_hit_without_sidecar_refetches_metadata(tmp_path: Path) -> None:
+    cache = tmp_path / "cache"
+    old_wheel = make_wheel("1.0.0", {"pkg/__init__.py": "x = 1\n"})
+    new_wheel = make_wheel("2.0.0", {"pkg/__init__.py": "x = 2\n"})
+    first = FakeFetcher(
+        {
+            **responses_for("pkg", "1.0.0", old_wheel),
+            **responses_for("pkg", "2.0.0", new_wheel),
+        }
+    )
+    diff_versions("pkg", "1.0.0", "2.0.0", cache_dir=cache, fetcher=first)
+    for version in ("1.0.0", "2.0.0"):
+        (cache / "_metadata" / f"pkg__{version}.json").unlink(missing_ok=True)
+
+    refetch = FakeFetcher(
+        {
+            f"{PYPI}/pkg/1.0.0/json": metadata(
+                "pkg", "1.0.0", wheel_filename("pkg", "1.0.0"), old_wheel, requires_python=">=3.8"
+            ),
+            f"{PYPI}/pkg/2.0.0/json": metadata(
+                "pkg", "2.0.0", wheel_filename("pkg", "2.0.0"), new_wheel, requires_python=">=3.10"
+            ),
+        }
+    )
+    result = diff_versions("pkg", "1.0.0", "2.0.0", cache_dir=cache, fetcher=refetch)
+
+    assert result.status == "ok"
+    assert result.old_requires_python == ">=3.8"
+    assert result.new_requires_python == ">=3.10"
+    assert sorted(refetch.calls) == [
+        f"{PYPI}/pkg/1.0.0/json",
+        f"{PYPI}/pkg/2.0.0/json",
+    ]
+    assert (cache / "_metadata" / "pkg__1.0.0.json").is_file()

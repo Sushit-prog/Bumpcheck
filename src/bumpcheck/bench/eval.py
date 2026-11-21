@@ -19,7 +19,7 @@ from bumpcheck.bench.labels import Label, load_candidates, load_labels
 
 Split = str
 Runner = Callable[[dict[str, Any], float], dict[str, Any]]
-RESULTS_SCHEMA_VERSION = 2
+RESULTS_SCHEMA_VERSION = 3
 
 
 def _project_root() -> Path:
@@ -198,7 +198,25 @@ def run_worker(payload: dict[str, Any], timeout: float) -> dict[str, Any]:
 
 def _empty_diagnostics(package: str | None = None) -> dict[str, Any]:
     return {
-        "requires_python": {"package": package, "old": None, "new": None},
+        "requires_python": {
+            "package": package,
+            "old": None,
+            "new": None,
+            "state": "unavailable",
+            "project": {
+                "source": "unknown",
+                "status": "unknown",
+                "versions": [],
+                "declared_spec": None,
+                "warnings": [],
+            },
+            "assessment": {
+                "decided": False,
+                "tightened": False,
+                "excluded": [],
+                "warnings": [],
+            },
+        },
         "snapshot": {"status": None, "repo_present": False},
         "bumps": [],
     }
