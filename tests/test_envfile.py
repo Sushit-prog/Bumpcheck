@@ -13,6 +13,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 def _write(path: Path, text: str, encoding: str = "utf-8") -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(text.encode(encoding))
+    if sys.platform != "win32":
+        path.chmod(0o600)
     return path
 
 
