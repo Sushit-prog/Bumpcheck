@@ -1,7 +1,0 @@
-#!/opt/homebrew/bin/python3
-
-# Required packages
-beautifulsoup4==4.12.3
-requests==2.32.3
-selenium==4.44.0
-webdriver-manager==4.0.2
