@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from bumpcheck import cli
 from bumpcheck.bench.labels import load_labels
 from bumpcheck.bench.snapshot import case_slug
 from bumpcheck.cli import app
@@ -55,6 +56,13 @@ def _base(tmp_path: Path, *, labels: list[dict[str, object]] | None = None) -> P
     )
     (case_dir / "payload.bin").write_bytes(b"abc")
     return tmp_path
+
+
+def _patch_snapshot_status(monkeypatch, *, status: str, error: str | None = None) -> None:
+    payload: dict[str, object] = {"case_id": "owner/repo#1", "status": status}
+    if error is not None:
+        payload["error"] = error
+    monkeypatch.setattr(cli, "snapshot_case", lambda *args, **kwargs: payload)
 
 
 def test_bench_snapshot_prints_disk_usage(tmp_path: Path) -> None:
@@ -354,3 +362,75 @@ def test_bench_report_with_no_labels_prints_message(tmp_path: Path, write_empty:
     assert result.exit_code == 0, result.output
     assert result.output.replace("\r\n", "\n").strip() == expected
     assert not (directory / "eval" / "report.md").exists()
+
+
+def test_bench_snapshot_exits_one_when_case_status_failed(tmp_path: Path, monkeypatch) -> None:
+    directory = _base(tmp_path)
+    _patch_snapshot_status(monkeypatch, status="failed")
+
+    result = runner.invoke(
+        app,
+        ["bench", "snapshot", "--dir", str(directory), "--offline", "--allow-unauthenticated"],
+    )
+
+    assert result.exit_code == 1, result.output
+
+
+def test_bench_snapshot_prints_per_case_status_size_and_error(tmp_path: Path, monkeypatch) -> None:
+    directory = _base(tmp_path)
+    _patch_snapshot_status(monkeypatch, status="failed", error="boom")
+
+    result = runner.invoke(
+        app,
+        ["bench", "snapshot", "--dir", str(directory), "--offline", "--allow-unauthenticated"],
+    )
+    output = result.output.replace("\r\n", "\n")
+
+    assert "owner/repo#1: failed (" in output
+    assert " bytes" in output
+    assert "boom" in output
+
+
+def test_bench_snapshot_prints_disk_usage_summary_before_failure_exit(
+    tmp_path: Path, monkeypatch
+) -> None:
+    directory = _base(tmp_path)
+    _patch_snapshot_status(monkeypatch, status="failed", error="boom")
+
+    result = runner.invoke(
+        app,
+        ["bench", "snapshot", "--dir", str(directory), "--offline", "--allow-unauthenticated"],
+    )
+    output = result.output.replace("\r\n", "\n")
+
+    assert result.exit_code == 1
+    assert output.index("owner/repo#1: failed") < output.index("snapshot disk usage:")
+
+
+def test_bench_snapshot_terminal_nonfailed_statuses_exit_zero(tmp_path: Path, monkeypatch) -> None:
+    directory = _base(tmp_path)
+    _patch_snapshot_status(monkeypatch, status="snapshot_incomplete")
+
+    result = runner.invoke(
+        app,
+        ["bench", "snapshot", "--dir", str(directory), "--offline", "--allow-unauthenticated"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "owner/repo#1: snapshot_incomplete" in result.output
+
+
+def test_bench_snapshot_redacts_failure_reason(tmp_path: Path, monkeypatch) -> None:
+    directory = _base(tmp_path)
+    reason = "https://user:secret@example.com/x?token=abc"
+    _patch_snapshot_status(monkeypatch, status="failed", error=reason)
+
+    result = runner.invoke(
+        app,
+        ["bench", "snapshot", "--dir", str(directory), "--offline", "--allow-unauthenticated"],
+    )
+
+    assert result.exit_code == 1
+    assert "secret" not in result.output
+    assert "token=abc" not in result.output
+    assert "***@" in result.output

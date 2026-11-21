@@ -20,6 +20,10 @@ from bumpcheck.verdict import (
 
 DiffFn = Callable[..., ApiDiffResult]
 UsageFn = Callable[..., UsageResult | None]
+BumpDiagnosticHook = Callable[
+    [BumpVerdict, ApiDiffResult | None, UsageResult | None],
+    None,
+]
 
 
 def _parameters(api: ApiDiffResult) -> dict[str, list[tuple[str, str]]]:
@@ -79,16 +83,34 @@ def check(
     diff_fn: DiffFn = diff_versions,
     usage_fn: UsageFn = trace_usage,
     cache_dir: Path | None = None,
+    on_bump: BumpDiagnosticHook | None = None,
 ) -> CheckResult:
     """Check every bump between two lockfiles and classify the breakage risk."""
     parsed = parse_lock_pair(old_text, new_text, kind)
     warnings: list[str] = list(parsed.warnings)
-    verdicts: list[BumpVerdict] = [_unresolved_verdict(item) for item in parsed.unresolved]
+
+    def emit(
+        verdict: BumpVerdict,
+        api: ApiDiffResult | None,
+        usage: UsageResult | None,
+    ) -> None:
+        if on_bump is not None:
+            on_bump(verdict, api, usage)
+
+    verdicts: list[BumpVerdict] = []
+    for item in parsed.unresolved:
+        verdict = _unresolved_verdict(item)
+        verdicts.append(verdict)
+        emit(verdict, None, None)
 
     for bump in parsed.bumps:
         if bump.old_version is None or bump.new_version is None:
-            verdicts.append(_missing_version_verdict(bump))
+            verdict = _missing_version_verdict(bump)
+            verdicts.append(verdict)
+            emit(verdict, None, None)
             continue
+        api: ApiDiffResult | None = None
+        usage: UsageResult | None = None
         try:
             api = diff_fn(
                 bump.package,
@@ -97,7 +119,6 @@ def check(
                 cache_dir=cache_dir,
             )
             warnings.extend(api.warnings)
-            usage: UsageResult | None = None
             if api.status == "ok" and api.changes:
                 usage = usage_fn(
                     repo_path,
@@ -108,9 +129,13 @@ def check(
                 )
                 if usage is not None:
                     warnings.extend(usage.warnings)
-            verdicts.append(decide(bump, api, usage))
+            verdict = decide(bump, api, usage)
+            verdicts.append(verdict)
+            emit(verdict, api, usage)
         except Exception as exc:
-            verdicts.append(_error_verdict(bump, exc))
+            verdict = _error_verdict(bump, exc)
+            verdicts.append(verdict)
+            emit(verdict, api, None)
 
     return CheckResult(
         pipeline_version=PIPELINE_VERSION,

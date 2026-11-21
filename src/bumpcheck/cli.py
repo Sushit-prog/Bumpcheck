@@ -26,7 +26,7 @@ from bumpcheck.bench.labels import (
 )
 from bumpcheck.bench.mine import mine as run_mine
 from bumpcheck.bench.report import write_report
-from bumpcheck.bench.snapshot import directory_size, snapshot_case
+from bumpcheck.bench.snapshot import directory_size, snapshot_case, snapshot_path
 from bumpcheck.check import check as run_check
 from bumpcheck.check import format_text
 from bumpcheck.envfile import EnvFileError, has_token, load_env
@@ -796,21 +796,33 @@ def bench_snapshot(
             cache_dir=cache_dir,
             max_rate_limit_wait_s=max_wait,
         )
+        failed_cases: list[str] = []
         for case_id in sorted(candidates):
             if wanted and case_id not in wanted:
                 continue
+            candidate = candidates[case_id]
             record = snapshot_case(
-                candidates[case_id],
+                candidate,
                 dir / "snapshots",
                 github_client=client,
                 force=force,
             )
-            typer.echo(f"{case_id}: {record.get('status')}")
+            status = str(record.get("status") or "failed")
+            size = directory_size(snapshot_path(dir / "snapshots", candidate))
+            line = f"{case_id}: {status} ({size} bytes)"
+            error = record.get("error")
+            if error:
+                line += f" - {redact(str(error))}"
+            typer.echo(line)
+            if status == "failed":
+                failed_cases.append(case_id)
     except (GitHubError, ValueError, OSError) as exc:
         typer.echo(redact(str(exc)), err=True)
         raise typer.Exit(code=2) from exc
     root = dir / "snapshots"
     typer.echo(f"snapshot disk usage: {directory_size(root)} bytes")
+    if failed_cases:
+        raise typer.Exit(code=1)
 
 
 @bench_app.command("eval")

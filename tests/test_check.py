@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 from typer.testing import CliRunner
@@ -351,3 +352,54 @@ def test_cli_check_parse_error_exits_2(tmp_path: Path) -> None:
     )
 
     assert result.exit_code == 2
+
+
+def test_check_on_bump_receives_api_and_usage_diagnostics(tmp_path: Path) -> None:
+    api = make_api(changes=[make_change()])
+    usage = make_usage([make_hit()])
+    events: list[tuple[Any, Any, Any]] = []
+
+    def on_bump(verdict: Any, api_value: Any, usage_value: Any) -> None:
+        events.append((verdict, api_value, usage_value))
+
+    result = check(
+        tmp_path,
+        uv_lock(("pkg", "1.0.0")),
+        uv_lock(("pkg", "2.0.0")),
+        "uv.lock",
+        diff_fn=lambda *args, **kwargs: api,
+        usage_fn=lambda *args, **kwargs: usage,
+        on_bump=on_bump,
+    )
+
+    assert len(events) == 1
+    assert events[0][0] is result.bumps[0]
+    assert events[0][1] is api
+    assert events[0][2] is usage
+
+
+def test_check_on_bump_receives_partial_diagnostics_on_usage_error(tmp_path: Path) -> None:
+    api = make_api(changes=[make_change()])
+    events: list[tuple[Any, Any, Any]] = []
+
+    def on_bump(verdict: Any, api_value: Any, usage_value: Any) -> None:
+        events.append((verdict, api_value, usage_value))
+
+    def failing_usage(*args: object, **kwargs: object) -> UsageResult:
+        raise RuntimeError("boom")
+
+    result = check(
+        tmp_path,
+        uv_lock(("pkg", "1.0.0")),
+        uv_lock(("pkg", "2.0.0")),
+        "uv.lock",
+        diff_fn=lambda *args, **kwargs: api,
+        usage_fn=failing_usage,
+        on_bump=on_bump,
+    )
+
+    assert len(events) == 1
+    assert events[0][0] is result.bumps[0]
+    assert events[0][0].rule_id == "E1"
+    assert events[0][1] is api
+    assert events[0][2] is None

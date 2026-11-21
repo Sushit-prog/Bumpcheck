@@ -4,10 +4,9 @@
 
 Definitions: false-safe rate = BROKE cases with verdict SAFE / all BROKE cases; SAFE precision = OK cases among SAFE verdicts; breakage recall = BROKE cases with REVIEW or LIKELY_BREAKING / all BROKE cases; LIKELY_BREAKING-only recall uses only LIKELY_BREAKING; UNKNOWN rate = UNKNOWN verdicts / all BROKE and OK cases. Every rate is shown as raw k/n with a 95% Wilson interval.
 
-## Known gap: Python-version-support breaks
+## Known gap: python_version_support breaks
 
 - Apocrathia/NSL-Downloader#49: BumpCheck said SAFE (rules: R7).
-- Worked example: `Apocrathia/NSL-Downloader#49`, expected BumpCheck result SAFE or UNKNOWN because Python-version-support breaks are not a rule.
 
 ## Headline metrics
 
@@ -28,9 +27,13 @@ Definitions: false-safe rate = BROKE cases with verdict SAFE / all BROKE cases; 
 
 ## Errors and disputed labels
 
-Reported separately (never counted as SAFE): none=1
+errors: 0 of 1 evaluated
+
+Reported separately (never counted as SAFE): none
 
 Disputed cases excluded from metrics: none
+
+Ignored result rows (unlabeled or label/category changed): 0
 
 ## Rules
 

@@ -8,6 +8,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+from bumpcheck.bench.eval import _label_records
 from bumpcheck.bench.labels import load_candidates, load_labels
 from bumpcheck.verdict import Verdict
 
@@ -164,6 +165,53 @@ def _load_excluded(path: Path) -> list[dict[str, Any]]:
     return records
 
 
+def _join_current_labels(
+    records: list[dict[str, Any]],
+    labels: dict[tuple[str, int], Any],
+) -> tuple[list[dict[str, Any]], int]:
+    truths = _label_records(labels)
+    selected: list[dict[str, Any]] = []
+    ignored = 0
+    for record in records:
+        case_id = str(record.get("case_id") or "")
+        truth = truths.get(case_id)
+        if truth is None:
+            ignored += 1
+            continue
+        current_label = str(truth["label"])
+        current_category = truth["break_category"]
+        changed = (
+            record.get("label") != current_label or record.get("break_category") != current_category
+        )
+        if changed:
+            ignored += 1
+        joined = dict(record)
+        joined["label"] = current_label
+        joined["break_category"] = current_category
+        if truth.get("disputed"):
+            joined["rounds"] = truth["rounds"]
+        selected.append(joined)
+    return selected, ignored
+
+
+def _known_gap_sections(records: list[dict[str, Any]]) -> list[str]:
+    gaps: dict[str, list[dict[str, Any]]] = {}
+    for record in records:
+        if record.get("label") != "BROKE" or _verdict(record, "bumpcheck") != "SAFE":
+            continue
+        category = str(record.get("break_category") or "none")
+        gaps.setdefault(category, []).append(record)
+    lines: list[str] = []
+    for category in sorted(gaps):
+        lines.extend([f"## Known gap: {category} breaks", ""])
+        for record in gaps[category]:
+            verdict = _verdict(record, "bumpcheck")
+            rules = ", ".join(sorted(_fired_rules(record, "bumpcheck"))) or "none"
+            lines.append(f"- {record.get('case_id')}: BumpCheck said {verdict} (rules: {rules}).")
+        lines.append("")
+    return lines
+
+
 def render_report(
     directory: Path,
     records: list[dict[str, Any]],
@@ -177,7 +225,8 @@ def render_report(
     candidates = load_candidates(candidates_path or base / "candidates.jsonl")
     labels = load_labels(labels_path or base / "labels.jsonl")
     excluded = _load_excluded(excluded_path or base / "excluded.jsonl")
-    selected = [record for record in records if split == "all" or record.get("split") == split]
+    split_records = [record for record in records if split == "all" or record.get("split") == split]
+    selected, ignored = _join_current_labels(split_records, labels)
     broke = [record for record in selected if record.get("label") == "BROKE"]
     disputed = [record for record in selected if record.get("label") == "DISPUTED"]
     fingerprints = _fingerprints(selected)
@@ -195,27 +244,13 @@ def render_report(
             "LIKELY_BREAKING; UNKNOWN rate = UNKNOWN verdicts / all BROKE and OK cases. "
             "Every rate is shown as raw k/n with a 95% Wilson interval.",
             "",
-            "## Known gap: Python-version-support breaks",
-            "",
         ]
     )
-    version_records = [
-        record for record in broke if record.get("break_category") == "python_version_support"
-    ]
-    if version_records:
-        for record in version_records:
-            verdict = _verdict(record, "bumpcheck")
-            rules = ", ".join(sorted(_fired_rules(record, "bumpcheck"))) or "none"
-            lines.append(f"- {record.get('case_id')}: BumpCheck said {verdict} (rules: {rules}).")
+    gap_lines = _known_gap_sections(selected)
+    if gap_lines:
+        lines.extend(gap_lines)
     else:
-        lines.append("- No labeled BROKE python_version_support cases in this split.")
-    lines.extend(
-        [
-            "- Worked example: `Apocrathia/NSL-Downloader#49`, expected BumpCheck result SAFE "
-            "or UNKNOWN because Python-version-support breaks are not a rule.",
-            "",
-        ]
-    )
+        lines.extend(["## Known gaps", "", "_No false-safe BROKE cases in this split._", ""])
 
     metric_names = [name for name, _ in _system_metrics(selected, SYSTEMS[0])]
     rows: list[list[str]] = []
@@ -247,13 +282,24 @@ def render_report(
         ]
     )
 
-    error_counts = Counter(str(record.get("error_kind") or "none") for record in selected)
+    error_kinds = [
+        str(record.get("error_kind"))
+        for record in selected
+        if record.get("error_kind") not in (None, "", "none")
+    ]
+    error_counts = Counter(error_kinds)
+    scored = [record for record in selected if record.get("label") in LABELS]
     lines.extend(
         [
             "## Errors and disputed labels",
             "",
+            f"errors: {len(error_kinds)} of {len(scored)} evaluated",
+            "",
             "Reported separately (never counted as SAFE): "
-            + ", ".join(f"{kind}={count}" for kind, count in sorted(error_counts.items())),
+            + (
+                ", ".join(f"{kind}={count}" for kind, count in sorted(error_counts.items()))
+                or "none"
+            ),
             "",
         ]
     )
@@ -267,6 +313,12 @@ def render_report(
         )
     else:
         lines.extend(["Disputed cases excluded from metrics: none", ""])
+    lines.extend(
+        [
+            f"Ignored result rows (unlabeled or label/category changed): {ignored}",
+            "",
+        ]
+    )
 
     rule_rows = _rule_counts(selected)
     lines.extend(

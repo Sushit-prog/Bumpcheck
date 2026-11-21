@@ -19,6 +19,7 @@ from bumpcheck.bench.labels import Label, load_candidates, load_labels
 
 Split = str
 Runner = Callable[[dict[str, Any], float], dict[str, Any]]
+RESULTS_SCHEMA_VERSION = 2
 
 
 def _project_root() -> Path:
@@ -195,7 +196,15 @@ def run_worker(payload: dict[str, Any], timeout: float) -> dict[str, Any]:
     return result if isinstance(result, dict) else {"error_kind": "worker_crash", "verdicts": {}}
 
 
-def _unknown_result(error_kind: str) -> dict[str, Any]:
+def _empty_diagnostics(package: str | None = None) -> dict[str, Any]:
+    return {
+        "requires_python": {"package": package, "old": None, "new": None},
+        "snapshot": {"status": None, "repo_present": False},
+        "bumps": [],
+    }
+
+
+def _unknown_result(error_kind: str, package: str | None = None) -> dict[str, Any]:
     return {
         "verdicts": {
             "bumpcheck": "UNKNOWN",
@@ -208,6 +217,7 @@ def _unknown_result(error_kind: str) -> dict[str, Any]:
         "runtime_s": 0.0,
         "error_kind": error_kind,
         "snapshot_status": None,
+        "diagnostics": _empty_diagnostics(package),
     }
 
 
@@ -250,7 +260,12 @@ def evaluate(
         if truth is None:
             continue
         previous = by_case.get(case_id)
-        if not force and previous is not None and previous.get("fingerprint") == current:
+        if (
+            not force
+            and previous is not None
+            and previous.get("fingerprint") == current
+            and previous.get("results_schema_version") == RESULTS_SCHEMA_VERSION
+        ):
             continue
         pending.append((candidate, truth))
 
@@ -259,6 +274,7 @@ def evaluate(
 
     def one(candidate: dict[str, Any], truth: dict[str, Any]) -> dict[str, Any]:
         case_id = str(candidate["case_id"])
+        package = str(candidate.get("package") or "").strip() or None
         record: dict[str, Any] = {
             "case_id": case_id,
             "label": truth["label"],
@@ -266,9 +282,11 @@ def evaluate(
             "split": candidate.get("split"),
             "sampled_by": candidate.get("sampled_by"),
             "fingerprint": current,
+            "results_schema_version": RESULTS_SCHEMA_VERSION,
+            "diagnostics": _empty_diagnostics(package),
         }
         if truth.get("disputed"):
-            record.update(_unknown_result("disputed_label"))
+            record.update(_unknown_result("disputed_label", package))
             record["rounds"] = truth["rounds"]
             return record
         payload = {
@@ -281,7 +299,7 @@ def evaluate(
         active_runner = runner or run_worker
         output = active_runner(payload, timeout)
         if not isinstance(output, dict):
-            output = _unknown_result("worker_crash")
+            output = _unknown_result("worker_crash", package)
         output.setdefault("verdicts", {})
         output.setdefault("fired_rule_ids", {})
         output.setdefault("evidence_refs", [])
@@ -289,6 +307,7 @@ def evaluate(
         output.setdefault("runtime_s", 0.0)
         output.setdefault("error_kind", None)
         output.setdefault("snapshot_status", None)
+        output.setdefault("diagnostics", _empty_diagnostics(package))
         record.update(output)
         return record
 

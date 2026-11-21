@@ -7,10 +7,14 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+from bumpcheck.apidiff import ApiChange, ApiDiffResult
 from bumpcheck.bench import eval as bench_eval
-from bumpcheck.bench import eval_worker
+from bumpcheck.bench import eval_worker, report
 from bumpcheck.bench.labels import Label
-from bumpcheck.verdict import BumpVerdict, CheckResult
+from bumpcheck.models import Bump
+from bumpcheck.rules import decide
+from bumpcheck.usage import SkippedFile, UsageResult
+from bumpcheck.verdict import BumpVerdict, CheckResult, Evidence
 
 
 def write_case(
@@ -43,7 +47,14 @@ def write_case(
             label=value,
             break_category="api_break" if value == "BROKE" else None,
             evidence_kind="log_names_package" if value == "BROKE" else None,
-            evidence="log names package" if value == "BROKE" else "",
+            evidence=(
+                "log names package"
+                if value == "BROKE"
+                else "excluded for test"
+                if value == "EXCLUDE"
+                else ""
+            ),
+            exclude_reason="not_attributable" if value == "EXCLUDE" else None,
             labeled_on=date(2026, 1, number),
         )
         lines.append(label.model_dump_json())
@@ -61,6 +72,133 @@ def result_payload(verdict: str = "SAFE") -> dict[str, Any]:
         "error_kind": None,
         "snapshot_status": "complete",
     }
+
+
+def write_label(
+    tmp_path: Path,
+    case_id: str,
+    value: str,
+    *,
+    category: str | None = None,
+    round_number: int = 1,
+) -> None:
+    label = Label(
+        case_id=case_id,
+        round=round_number,
+        label=value,
+        break_category=category,
+        evidence_kind="log_names_package" if value == "BROKE" else None,
+        evidence=(
+            "log names package"
+            if value == "BROKE"
+            else "excluded for test"
+            if value == "EXCLUDE"
+            else ""
+        ),
+        exclude_reason="not_attributable" if value == "EXCLUDE" else None,
+        labeled_on=date(2026, 1, round_number),
+    )
+    (tmp_path / "labels.jsonl").write_text(label.model_dump_json() + "\n", encoding="utf-8")
+
+
+def snapshot_root(
+    tmp_path: Path,
+    *,
+    status: str = "complete",
+    requires_python: str | None = None,
+    blank_requires_python: bool = False,
+    include_metadata_file: bool = True,
+) -> Path:
+    root = tmp_path / "snapshot"
+    (root / "old").mkdir(parents=True, exist_ok=True)
+    (root / "new").mkdir(parents=True, exist_ok=True)
+    (root / "repo").mkdir(parents=True, exist_ok=True)
+    (root / "old-lock.txt").write_text("pkg==1\n", encoding="utf-8")
+    (root / "new-lock.txt").write_text("pkg==2\n", encoding="utf-8")
+    (root / "old" / "old.whl").write_bytes(b"old")
+    (root / "new" / "new.whl").write_bytes(b"new")
+    if include_metadata_file:
+        payload = {"info": {"requires_python": requires_python or ""}}
+        for side in ("old", "new"):
+            (root / side / "metadata.json").write_text(json.dumps(payload), encoding="utf-8")
+    manifest: dict[str, Any] = {
+        "status": status,
+        "old": {
+            "wheel_url": "https://files.pythonhosted/old.whl",
+            "wheel_file": "old/old.whl",
+        },
+        "new": {
+            "wheel_url": "https://files.pythonhosted/new.whl",
+            "wheel_file": "new/new.whl",
+        },
+        "lockfiles": {"requirements.txt": {"old": "old-lock.txt", "new": "new-lock.txt"}},
+    }
+    if include_metadata_file:
+        manifest["old"]["metadata_file"] = "old/metadata.json"
+        manifest["new"]["metadata_file"] = "new/metadata.json"
+    (root / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    return root
+
+
+def worker_payload(root: Path, *, package: str = "pkg") -> dict[str, Any]:
+    return {
+        "snapshot": str(root),
+        "candidate": {
+            "package": package,
+            "old_version": "1.0.0",
+            "new_version": "2.0.0",
+            "lockfile_kind": "requirements",
+            "lockfile_paths": ["requirements.txt"],
+        },
+    }
+
+
+def make_verdict(
+    *,
+    evidence: tuple[Evidence, ...] = (),
+    rule_id: str = "R7",
+    verdict: str = "SAFE",
+) -> BumpVerdict:
+    return BumpVerdict(
+        package="pkg",
+        old_version="1.0.0",
+        new_version="2.0.0",
+        verdict=verdict,
+        rule_id=rule_id,
+        rationale="test verdict",
+        evidence=evidence,
+        api_status="ok",
+    )
+
+
+def make_api(changes: list[ApiChange]) -> ApiDiffResult:
+    return ApiDiffResult(
+        package="pkg",
+        old_version="1.0.0",
+        new_version="2.0.0",
+        status="ok",
+        changes=changes,
+        top_level=["pkg"],
+    )
+
+
+def fake_check(
+    verdicts: tuple[BumpVerdict, ...],
+    *,
+    apis: dict[int, ApiDiffResult] | None = None,
+    usages: dict[int, UsageResult] | None = None,
+    overall: str = "SAFE",
+):
+    apis = apis or {}
+    usages = usages or {}
+
+    def run(*args: object, **kwargs: object) -> CheckResult:
+        hook = kwargs["on_bump"]
+        for verdict in verdicts:
+            hook(verdict, apis.get(id(verdict)), usages.get(id(verdict)))
+        return CheckResult(overall=overall, bumps=verdicts)
+
+    return run
 
 
 def test_eval_defaults_to_dev_and_logs_test_runs(tmp_path: Path) -> None:
@@ -228,3 +366,294 @@ def test_worker_records_unparsable_file_count(tmp_path: Path, monkeypatch) -> No
 
     assert result["parse_failures"] == 1
     assert result["verdicts"]["bumpcheck"] == "SAFE"
+
+
+def test_relabel_broke_to_ok_reuses_verdict_and_report_shows_new_label(tmp_path: Path) -> None:
+    write_case(tmp_path)
+    fingerprint = {"id": "fp1"}
+    calls: list[str] = []
+
+    def runner(payload: dict, timeout: float) -> dict:
+        calls.append(payload["case_id"])
+        return result_payload()
+
+    records = bench_eval.evaluate(tmp_path, fingerprint=fingerprint, runner=runner)
+    assert records[0]["label"] == "BROKE"
+    assert calls == ["owner/repo#1"]
+
+    write_label(tmp_path, "owner/repo#1", "OK")
+    records = bench_eval.evaluate(tmp_path, fingerprint=fingerprint, runner=runner)
+    assert calls == ["owner/repo#1"]
+    assert records[0]["label"] == "BROKE"
+
+    text = report.render_report(tmp_path, records, split="dev")
+    assert "| OK | 0/1 = 0.0%" in text, text
+    assert "Ignored result rows (unlabeled or label/category changed): 1" in text
+
+
+def test_relabel_exclude_to_broke_case_gets_evaluated(tmp_path: Path) -> None:
+    write_case(tmp_path, rounds=("EXCLUDE",))
+    calls: list[str] = []
+
+    def runner(payload: dict, timeout: float) -> dict:
+        calls.append(payload["case_id"])
+        return result_payload()
+
+    bench_eval.evaluate(tmp_path, fingerprint={"id": "fp1"}, runner=runner)
+    assert calls == []
+
+    write_label(tmp_path, "owner/repo#1", "BROKE", category="api_break")
+    records = bench_eval.evaluate(tmp_path, fingerprint={"id": "fp1"}, runner=runner)
+
+    assert calls == ["owner/repo#1"]
+    assert records[0]["label"] == "BROKE"
+
+
+def test_exclude_labels_are_skipped_by_eval(tmp_path: Path) -> None:
+    write_case(tmp_path, rounds=("EXCLUDE",))
+
+    def forbidden(payload: dict, timeout: float) -> dict:
+        raise AssertionError("excluded cases must not run")
+
+    records = bench_eval.evaluate(tmp_path, fingerprint={"id": "fp1"}, runner=forbidden)
+
+    assert records == []
+
+
+def test_eval_recomputes_records_with_stale_results_schema_version(tmp_path: Path) -> None:
+    write_case(tmp_path)
+    fingerprint = {"id": "fp1"}
+    stale = {
+        "case_id": "owner/repo#1",
+        "label": "BROKE",
+        "break_category": "api_break",
+        "split": "dev",
+        "fingerprint": fingerprint,
+        "results_schema_version": 1,
+        **result_payload("SAFE"),
+    }
+    bench_eval.write_results(tmp_path / "eval" / "results.jsonl", [stale])
+    calls: list[str] = []
+
+    def runner(payload: dict, timeout: float) -> dict:
+        calls.append(payload["case_id"])
+        return result_payload("UNKNOWN")
+
+    records = bench_eval.evaluate(tmp_path, fingerprint=fingerprint, runner=runner)
+
+    assert calls == ["owner/repo#1"]
+    assert records[0]["verdicts"]["bumpcheck"] == "UNKNOWN"
+    assert records[0]["results_schema_version"] == bench_eval.RESULTS_SCHEMA_VERSION
+
+
+def test_worker_persists_per_bump_diagnostics(tmp_path: Path, monkeypatch) -> None:
+    root = snapshot_root(tmp_path)
+    change = ApiChange(
+        kind="PARAMETER_REMOVED",
+        symbol="pkg.Client",
+        severity="high",
+        detail="removed timeout",
+        parameter="timeout",
+    )
+    api = make_api([change])
+    usage = UsageResult(
+        package="pkg",
+        symbols=["pkg.Client"],
+        files_scanned=2,
+        files_skipped=[SkippedFile(file="broken.py", reason="unparsable")],
+        risks=["dynamic_import_unknown_target"],
+    )
+    verdict = make_verdict()
+    monkeypatch.setattr(
+        eval_worker,
+        "run_check",
+        fake_check((verdict,), apis={id(verdict): api}, usages={id(verdict): usage}),
+    )
+
+    result = eval_worker.run_case(worker_payload(root))
+
+    diagnostics = result["diagnostics"]
+    assert result["error_kind"] is None, result.get("worker_error")
+    assert diagnostics["snapshot"] == {"status": "complete", "repo_present": True}
+    assert len(diagnostics["bumps"]) == 1
+    bump = diagnostics["bumps"][0]
+    assert bump["package"] == "pkg"
+    assert bump["rule_id"] == "R7"
+    assert bump["api_diff"] == {
+        "status": "ok",
+        "reason": None,
+        "change_count": 1,
+        "changes_by_kind": {"PARAMETER_REMOVED": 1},
+        "changes_by_severity": {"high": 1, "medium": 0, "low": 0},
+    }
+    assert bump["usage"] == {
+        "status": "ok",
+        "files_scanned": 2,
+        "files_skipped": 1,
+        "hit_count": 0,
+        "risk_flags": ["dynamic_import_unknown_target"],
+    }
+
+
+def test_worker_reads_requires_python_from_snapshot_metadata(tmp_path: Path, monkeypatch) -> None:
+    root = snapshot_root(tmp_path, requires_python=">=3.9")
+    verdict = make_verdict()
+    monkeypatch.setattr(eval_worker, "run_check", fake_check((verdict,)))
+
+    result = eval_worker.run_case(worker_payload(root))
+
+    assert result["diagnostics"]["requires_python"] == {
+        "package": "pkg",
+        "old": ">=3.9",
+        "new": ">=3.9",
+    }
+
+
+def test_worker_requires_python_null_when_metadata_missing_or_blank(
+    tmp_path: Path, monkeypatch
+) -> None:
+    verdict = make_verdict()
+    monkeypatch.setattr(eval_worker, "run_check", fake_check((verdict,)))
+
+    missing = eval_worker.run_case(
+        worker_payload(snapshot_root(tmp_path / "missing", include_metadata_file=False))
+    )
+    blank = eval_worker.run_case(
+        worker_payload(snapshot_root(tmp_path / "blank", blank_requires_python=True))
+    )
+
+    assert missing["diagnostics"]["requires_python"] == {
+        "package": "pkg",
+        "old": None,
+        "new": None,
+    }
+    assert blank["diagnostics"]["requires_python"] == {
+        "package": "pkg",
+        "old": None,
+        "new": None,
+    }
+
+
+def test_worker_enriches_no_usage_evidence_with_change_kind_and_parameter(
+    tmp_path: Path, monkeypatch
+) -> None:
+    changes = [
+        ApiChange(
+            kind="PARAMETER_REMOVED",
+            symbol="pkg.Client",
+            severity="high",
+            detail="a removed",
+            parameter="a",
+        ),
+        ApiChange(
+            kind="PARAMETER_REMOVED",
+            symbol="pkg.Client",
+            severity="high",
+            detail="b removed",
+            parameter="b",
+        ),
+        ApiChange(
+            kind="OBJECT_REMOVED",
+            symbol="pkg.Client",
+            severity="medium",
+            detail="object removed",
+        ),
+    ]
+    api = make_api(changes)
+    verdict = make_verdict(
+        evidence=tuple(
+            Evidence(
+                kind="reason", summary=f"No usage found for {change.symbol}", symbol=change.symbol
+            )
+            for change in changes
+        )
+    )
+    monkeypatch.setattr(
+        eval_worker,
+        "run_check",
+        fake_check((verdict,), apis={id(verdict): api}),
+    )
+
+    result = eval_worker.run_case(worker_payload(snapshot_root(tmp_path)))
+
+    assert [item["summary"] for item in result["evidence_refs"]] == [
+        "No usage found for pkg.Client (PARAMETER_REMOVED: a, b; OBJECT_REMOVED)"
+    ]
+
+
+def test_worker_dedupes_evidence_refs_preserving_order(tmp_path: Path, monkeypatch) -> None:
+    change = ApiChange(
+        kind="PARAMETER_REMOVED",
+        symbol="pkg.Client",
+        severity="high",
+        detail="removed timeout",
+        parameter="timeout",
+    )
+    api = make_api([change])
+    reason = Evidence(kind="reason", summary="No usage found for pkg.Client", symbol="pkg.Client")
+    hit = Evidence(
+        kind="usage_hit",
+        summary="call pkg.Client",
+        file="app.py",
+        line=3,
+        symbol="pkg.Client",
+    )
+    verdicts = (make_verdict(evidence=(reason, hit)), make_verdict(evidence=(reason, hit)))
+    monkeypatch.setattr(
+        eval_worker,
+        "run_check",
+        fake_check(verdicts, apis={id(verdict): api for verdict in verdicts}),
+    )
+
+    result = eval_worker.run_case(worker_payload(snapshot_root(tmp_path)))
+
+    summaries = [item["summary"] for item in result["evidence_refs"]]
+    assert len(summaries) == 2
+    assert summaries[0] == "No usage found for pkg.Client (PARAMETER_REMOVED: timeout)"
+    assert summaries[1] == "call pkg.Client"
+
+
+def test_worker_diagnostics_empty_for_incomplete_snapshot(tmp_path: Path) -> None:
+    root = snapshot_root(tmp_path, status="failed")
+
+    result = eval_worker.run_case(worker_payload(root))
+
+    assert result["snapshot_status"] == "failed"
+    assert result["error_kind"] == "failed"
+    assert result["diagnostics"]["snapshot"] == {"status": "failed", "repo_present": True}
+    assert result["diagnostics"]["bumps"] == []
+
+
+def test_no_usage_evidence_enrichment_matches_real_rules_output() -> None:
+    changes = [
+        ApiChange(
+            kind="PARAMETER_REMOVED",
+            symbol="pkg.Client",
+            severity="medium",
+            detail="m removed",
+            parameter="m",
+        ),
+        ApiChange(
+            kind="OBJECT_REMOVED",
+            symbol="pkg.Other",
+            severity="low",
+            detail="object removed",
+        ),
+    ]
+    api = make_api(changes)
+    usage = UsageResult(package="pkg", symbols=["pkg.Client", "pkg.Other"], files_scanned=1)
+    bump = Bump(
+        package="pkg",
+        old_version="1.0.0",
+        new_version="2.0.0",
+        source="uv.lock",
+    )
+
+    verdict = decide(bump, api, usage)
+    refs = eval_worker._build_evidence_refs((verdict,), {id(verdict): (api, usage)})
+
+    assert verdict.rule_id == "R7"
+    assert [item["summary"] for item in refs] == [
+        "No usage found for pkg.Client (PARAMETER_REMOVED: m)",
+        "No usage found for pkg.Other (OBJECT_REMOVED)",
+    ]

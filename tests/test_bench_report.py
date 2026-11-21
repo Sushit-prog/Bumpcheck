@@ -1,14 +1,43 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
 from bumpcheck.bench import report
 
 
-def base_dir(tmp_path: Path) -> Path:
+def label(
+    case_id: str,
+    value: str,
+    *,
+    category: str | None = None,
+    round_number: int = 1,
+) -> dict[str, Any]:
+    return {
+        "case_id": case_id,
+        "round": round_number,
+        "label": value,
+        "break_category": category,
+        "evidence_kind": "log_names_package" if value == "BROKE" else None,
+        "evidence": (
+            "log names package"
+            if value == "BROKE"
+            else "excluded for test"
+            if value == "EXCLUDE"
+            else ""
+        ),
+        "exclude_reason": "not_attributable" if value == "EXCLUDE" else None,
+        "labeled_on": "2026-01-01",
+    }
+
+
+def base_dir(tmp_path: Path, labels: tuple[dict[str, Any], ...] = ()) -> Path:
     (tmp_path / "candidates.jsonl").write_text("", encoding="utf-8")
-    (tmp_path / "labels.jsonl").write_text("", encoding="utf-8")
+    (tmp_path / "labels.jsonl").write_text(
+        "".join(json.dumps(item) + "\n" for item in labels),
+        encoding="utf-8",
+    )
     (tmp_path / "excluded.jsonl").write_text(
         '{"case_id":"x","repo":"o/r","pr_number":2,"reason":"parse_mismatch"}\n',
         encoding="utf-8",
@@ -22,7 +51,7 @@ def fingerprint(value: str) -> dict[str, Any]:
 
 def record(
     case_id: str,
-    label: str,
+    label_value: str,
     verdict: str,
     *,
     category: str | None = None,
@@ -33,7 +62,7 @@ def record(
 ) -> dict[str, Any]:
     return {
         "case_id": case_id,
-        "label": label,
+        "label": label_value,
         "break_category": category,
         "split": split,
         "sampled_by": "failure",
@@ -61,7 +90,15 @@ def test_wilson_values() -> None:
 
 
 def test_report_rates_include_wilson_and_unknown_denominators(tmp_path: Path) -> None:
-    directory = base_dir(tmp_path)
+    directory = base_dir(
+        tmp_path,
+        (
+            label("a", "BROKE", category="api_break"),
+            label("b", "BROKE", category="python_version_support"),
+            label("c", "OK"),
+            label("d", "OK"),
+        ),
+    )
     records = [
         record("a", "BROKE", "SAFE", category="api_break", rules=["R7"]),
         record(
@@ -79,18 +116,25 @@ def test_report_rates_include_wilson_and_unknown_denominators(tmp_path: Path) ->
 
     assert text.startswith("# Benchmark report (split: dev)")
     assert "n is small; do not quote these numbers publicly" in text
-    known_gap = text.index("## Known gap: Python-version-support breaks")
+    known_gap = text.index("## Known gap: api_break breaks")
     assert known_gap < text.index("## Headline metrics")
     assert "o/r#1" not in text
     assert "owner/repo" not in text
-    assert "b: BumpCheck said UNKNOWN" in text or ": BumpCheck said UNKNOWN" in text
+    assert "a: BumpCheck said SAFE" in text
     assert "0/2 = 0.0% [0.0, 65.8]" in text
     assert "1/2 = 50.0% [9.5, 90.5]" in text
     assert "1/4 = 25.0% [4.6, 69.9]" in text
 
 
 def test_report_lists_disputed_and_mixed_fingerprints(tmp_path: Path) -> None:
-    directory = base_dir(tmp_path)
+    directory = base_dir(
+        tmp_path,
+        (
+            label("a", "BROKE", category="api_break"),
+            label("b", "BROKE", category="api_break"),
+            label("b", "OK", round_number=2),
+        ),
+    )
     records = [
         record("a", "BROKE", "SAFE"),
         record("b", "DISPUTED", "UNKNOWN", fp="two"),
@@ -100,13 +144,16 @@ def test_report_lists_disputed_and_mixed_fingerprints(tmp_path: Path) -> None:
 
     assert "Warning: mixed fingerprints: one, two" in text
     assert "Disputed cases excluded from metrics: b" in text
-    assert "round 1 unless round 2 exists." in text
+    assert "round 1 unless round 2 exists" in text
     assert "parse_mismatch=1" in text
     assert "~2% BROKE" in text
 
 
 def test_report_rule_tp_fp_uses_break_category_of_label(tmp_path: Path) -> None:
-    directory = base_dir(tmp_path)
+    directory = base_dir(
+        tmp_path,
+        (label("a", "BROKE", category="api_break"), label("b", "OK")),
+    )
     records = [
         record("a", "BROKE", "REVIEW", category="api_break", rules=["R7"]),
         record("b", "OK", "SAFE", rules=["R7"]),
@@ -118,9 +165,123 @@ def test_report_rule_tp_fp_uses_break_category_of_label(tmp_path: Path) -> None:
 
 
 def test_write_report_writes_markdown(tmp_path: Path) -> None:
-    directory = base_dir(tmp_path)
+    directory = base_dir(tmp_path, (label("a", "OK"),))
     records = [record("a", "OK", "SAFE")]
 
     text = report.write_report(directory, records, split="dev")
 
     assert text == (directory / "eval" / "report.md").read_text(encoding="utf-8")
+
+
+def test_report_uses_current_labels_by_case_id(tmp_path: Path) -> None:
+    directory = base_dir(tmp_path, (label("a", "BROKE", category="api_break"),))
+    records = [record("a", "OK", "SAFE")]
+
+    text = report.render_report(directory, records, split="dev")
+
+    assert "false-safe rate | 1/1 = 100.0%" in text
+    assert "Ignored result rows (unlabeled or label/category changed): 1" in text
+
+
+def test_report_current_exclude_removes_stale_result(tmp_path: Path) -> None:
+    directory = base_dir(tmp_path, (label("a", "EXCLUDE"),))
+    records = [record("a", "BROKE", "SAFE", category="api_break")]
+
+    text = report.render_report(directory, records, split="dev")
+
+    assert "a: BumpCheck said SAFE" not in text
+    assert "false-safe rate | 0/0 (n/a)" in text
+    assert "Ignored result rows (unlabeled or label/category changed): 1" in text
+
+
+def test_report_unlabeled_results_are_ignored(tmp_path: Path) -> None:
+    directory = base_dir(tmp_path)
+    records = [record("a", "BROKE", "SAFE", category="api_break")]
+
+    text = report.render_report(directory, records, split="dev")
+
+    assert "a: BumpCheck said SAFE" not in text
+    assert "Ignored result rows (unlabeled or label/category changed): 1" in text
+
+
+def test_report_current_disputed_labels_remain_disputed(tmp_path: Path) -> None:
+    directory = base_dir(
+        tmp_path,
+        (
+            label("a", "BROKE", category="api_break"),
+            label("a", "OK", round_number=2),
+        ),
+    )
+    records = [record("a", "DISPUTED", "UNKNOWN")]
+
+    text = report.render_report(directory, records, split="dev")
+
+    assert "Disputed cases excluded from metrics: a" in text
+    assert "Ignored result rows (unlabeled or label/category changed): 0" in text
+
+
+def test_report_label_changed_count_is_printed(tmp_path: Path) -> None:
+    directory = base_dir(tmp_path, (label("a", "BROKE", category="api_break"),))
+    records = [record("a", "OK", "SAFE")]
+
+    text = report.render_report(directory, records, split="dev")
+
+    assert "Ignored result rows (unlabeled or label/category changed): 1" in text
+
+
+def test_report_error_counts_ignore_none(tmp_path: Path) -> None:
+    directory = base_dir(
+        tmp_path,
+        (label("a", "BROKE", category="api_break"), label("b", "OK")),
+    )
+    records = [
+        record("a", "BROKE", "SAFE", error_kind=None),
+        record("b", "OK", "SAFE", error_kind="timeout"),
+    ]
+
+    text = report.render_report(directory, records, split="dev")
+
+    assert "timeout=1" in text
+    assert "none=" not in text
+
+
+def test_report_errors_line_uses_scored_results_only(tmp_path: Path) -> None:
+    directory = base_dir(
+        tmp_path,
+        (
+            label("a", "BROKE", category="api_break"),
+            label("b", "OK"),
+            label("c", "BROKE", category="api_break"),
+            label("c", "OK", round_number=2),
+        ),
+    )
+    records = [
+        record("a", "BROKE", "UNKNOWN", error_kind="timeout"),
+        record("b", "OK", "SAFE"),
+        record("c", "DISPUTED", "UNKNOWN", error_kind="timeout"),
+    ]
+
+    text = report.render_report(directory, records, split="dev")
+
+    assert "errors: 2 of 2 evaluated" in text
+
+
+def test_report_known_gap_has_no_hardcoded_case_id(tmp_path: Path) -> None:
+    directory = base_dir(tmp_path, (label("x", "BROKE", category="python_version_support"),))
+    records = [record("x", "BROKE", "SAFE", category="python_version_support", rules=["R7"])]
+
+    text = report.render_report(directory, records, split="dev")
+
+    assert "## Known gap: python_version_support breaks" in text
+    assert "x: BumpCheck said SAFE (rules: R7)" in text
+    assert "NSL-Downloader#49" not in text
+
+
+def test_report_known_gap_omitted_without_false_safe_category(tmp_path: Path) -> None:
+    directory = base_dir(tmp_path, (label("a", "BROKE", category="api_break"),))
+    records = [record("a", "BROKE", "REVIEW", category="api_break")]
+
+    text = report.render_report(directory, records, split="dev")
+
+    assert "## Known gap:" not in text
+    assert "NSL-Downloader#49" not in text
