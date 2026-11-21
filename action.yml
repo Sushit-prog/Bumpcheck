@@ -45,6 +45,15 @@ runs:
         persist-credentials: false
         token: ${{ inputs.github-token }}
 
+    - name: Check out PR head
+      uses: actions/checkout@v4
+      with:
+        repository: ${{ github.event.pull_request.head.repo.full_name }}
+        ref: ${{ github.event.pull_request.head.sha }}
+        path: ${{ runner.temp }}/bumpcheck/pr
+        persist-credentials: false
+        token: ${{ inputs.github-token }}
+
     - name: Install uv
       uses: astral-sh/setup-uv@v5
       with:
@@ -62,21 +71,16 @@ runs:
         LOCKFILE: ${{ inputs.lockfile }}
         LOCK_KIND: ${{ inputs.lock-kind }}
         FAIL_ON: ${{ inputs.fail-on }}
-        BASE_REF: ${{ github.base_ref }}
-        PR_NUMBER: ${{ github.event.number }}
       run: |
         set -euo pipefail
         work="$RUNNER_TEMP/bumpcheck"
         report="$work/report.md"
-        old_lock="$work/old.lock"
-        new_lock="$work/new.lock"
         pr_tree="$work/pr"
+        old_lock="$GITHUB_WORKSPACE/${LOCKFILE}"
+        new_lock="$pr_tree/${LOCKFILE}"
         mkdir -p "$work"
 
-        git -c http.extraheader="AUTHORIZATION: bearer ${GH_TOKEN}" fetch --no-tags origin "${BASE_REF}:bumpcheck-base"
-        git -c http.extraheader="AUTHORIZATION: bearer ${GH_TOKEN}" fetch --no-tags origin "pull/${PR_NUMBER}/head:bumpcheck-pr"
-
-        if ! git show "bumpcheck-base:${LOCKFILE}" > "$old_lock" 2>/dev/null; then
+        if [ ! -f "$old_lock" ]; then
           printf '## BumpCheck: skipped\n\nThe configured lockfile was not present on the base side of the pull request.\n' > "$report"
           echo "overall=SKIPPED" >> "$GITHUB_OUTPUT"
           echo "report-path=$report" >> "$GITHUB_OUTPUT"
@@ -85,7 +89,7 @@ runs:
           exit 0
         fi
 
-        if ! git show "bumpcheck-pr:${LOCKFILE}" > "$new_lock" 2>/dev/null; then
+        if [ ! -f "$new_lock" ]; then
           printf '## BumpCheck: skipped\n\nThe configured lockfile was not present on the pull request side.\n' > "$report"
           echo "overall=SKIPPED" >> "$GITHUB_OUTPUT"
           echo "report-path=$report" >> "$GITHUB_OUTPUT"
@@ -93,8 +97,6 @@ runs:
           echo "skip=true" >> "$GITHUB_OUTPUT"
           exit 0
         fi
-
-        git worktree add --detach "$pr_tree" "bumpcheck-pr"
 
         if [ -n "${LOCK_KIND}" ]; then
           kind="${LOCK_KIND}"

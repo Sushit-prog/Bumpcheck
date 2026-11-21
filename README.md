@@ -153,8 +153,9 @@ with:
 Inputs are `github-token`, `lockfile` (default `uv.lock`), `lock-kind`
 (auto-detected when empty), `fail-on` (default `REVIEW`), `comment` (default
 `true`), and `artifact-name`. The action checks out the base ref for tooling and
-reads pull request files as Git data, so the PR's code is never executed. A
-workflow using the action needs `contents: read` and `pull-requests: write`.
+the PR head into a temporary path for static analysis, so the PR's code is never
+executed. A workflow using the action needs `contents: read` and
+`pull-requests: write`.
 
 ## Benchmark
 
