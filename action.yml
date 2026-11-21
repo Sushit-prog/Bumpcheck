@@ -50,7 +50,7 @@ runs:
       with:
         repository: ${{ github.event.pull_request.head.repo.full_name }}
         ref: ${{ github.event.pull_request.head.sha }}
-        path: ${{ runner.temp }}/bumpcheck/pr
+        path: ${{ github.workspace }}/.bumpcheck-pr
         persist-credentials: false
         token: ${{ inputs.github-token }}
 
@@ -75,7 +75,7 @@ runs:
         set -euo pipefail
         work="$RUNNER_TEMP/bumpcheck"
         report="$work/report.md"
-        pr_tree="$work/pr"
+        pr_tree="$GITHUB_WORKSPACE/.bumpcheck-pr"
         old_lock="$GITHUB_WORKSPACE/${LOCKFILE}"
         new_lock="$pr_tree/${LOCKFILE}"
         mkdir -p "$work"
