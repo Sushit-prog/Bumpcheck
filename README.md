@@ -1,455 +1,808 @@
-BumpCheck analyzes whether a dependency bump in a Dependabot or Renovate pull request will break your code.
+# BumpCheck
 
-Status: early development (v0.1.2)
+**BumpCheck analyzes whether a Python dependency update in a Dependabot or Renovate pull request is likely to break your code.**
 
-## Install
+It combines **lockfile analysis, public API diffing, static usage tracing, Python-version compatibility checks, and rule-based risk classification** to turn dependency bumps into actionable compatibility verdicts.
 
-BumpCheck is published as the `bumpcheck-py` distribution and installs a
-`bumpcheck` command:
+> **Status:** Early development — `v0.1.2`
 
-```
+---
+
+## Quick Start
+
+### 1. Install BumpCheck
+
+BumpCheck is published as the `bumpcheck-py` distribution.
+
+```bash
 uv tool install bumpcheck-py
 ```
 
-## Real-world validation
+Verify the installation:
 
-Validate the lockfile parser against real GitHub pull requests. List the PR
-URLs (one per line, `#` comments allowed) in `realworld/prs.txt`, then run:
-
+```bash
+bumpcheck --help
 ```
+
+---
+
+### 2. Run it against a dependency bump
+
+BumpCheck compares two versions of a lockfile and analyzes the dependency changes against your repository.
+
+For a `uv.lock` update:
+
+```bash
+bumpcheck check REPO_PATH OLD_LOCKFILE NEW_LOCKFILE --kind uv.lock
+```
+
+For example:
+
+```bash
+bumpcheck check . /tmp/base/uv.lock /tmp/head/uv.lock --kind uv.lock
+```
+
+You can choose the output format:
+
+```bash
+bumpcheck check . /tmp/base/uv.lock /tmp/head/uv.lock \
+  --kind uv.lock \
+  --format markdown
+```
+
+Possible overall results are:
+
+```text
+SAFE
+REVIEW
+LIKELY_BREAKING
+UNKNOWN
+```
+
+---
+
+### 3. Understand the result
+
+A typical workflow looks like:
+
+```text
+Dependency bump
+      │
+      ▼
+Parse lockfiles
+      │
+      ▼
+Compare package APIs
+      │
+      ▼
+Trace repository usage
+      │
+      ▼
+Check Python compatibility
+      │
+      ▼
+Apply safety rules
+      │
+      ▼
+SAFE / REVIEW / LIKELY_BREAKING / UNKNOWN
+```
+
+For example:
+
+```text
+requests 2.31.0 → 2.32.0
+
+API changes:       3
+Repository hits:   0
+Blocking risks:    0
+Python support:    compatible
+
+Verdict: SAFE
+```
+
+A `SAFE` result means BumpCheck found no relevant API changes used by the repository and no blocking analysis risks.
+
+It does **not** prove runtime or behavioral compatibility.
+
+---
+
+## Quick API Diff
+
+You can inspect the public API changes between two PyPI releases independently:
+
+```bash
+bumpcheck diff requests 2.31.0 2.32.0
+```
+
+BumpCheck:
+
+- downloads wheels only
+- verifies their hashes
+- does not install the package
+- does not import the package
+- unpacks the wheels into its cache
+
+If an API comparison cannot be performed, BumpCheck returns `no_api_diff` with an explanation.
+
+---
+
+## Quick Usage Trace
+
+To see whether your repository uses specific symbols from a package:
+
+```bash
+bumpcheck usage . requests \
+  --symbols Session \
+  --symbols get \
+  --symbols request
+```
+
+The tracer uses Python's AST and does not execute your repository.
+
+You can also trace every changed symbol from an API-diff result:
+
+```bash
+bumpcheck usage . requests \
+  --api-diff API_DIFF.json
+```
+
+---
+
+## Quick GitHub Action
+
+The easiest way to run BumpCheck automatically on dependency-update pull requests is the included GitHub Action.
+
+Create:
+
+```text
+.github/workflows/bumpcheck.yml
+```
+
+with:
+
+```yaml
+name: BumpCheck
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  dependency-safety:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: Sushit-prog/Bumpcheck@main
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          lockfile: uv.lock
+          fail-on: REVIEW
+```
+
+The action compares the base and PR versions of the lockfile, generates a Markdown report, uploads it as an artifact, and posts a sticky PR comment.
+
+The PR's Python code is **never executed**.
+
+### What happens on a pull request?
+
+```text
+Dependabot / Renovate PR
+          │
+          ▼
+      BumpCheck
+          │
+     ┌────┴────┐
+     ▼         ▼
+ Lockfile    API diff
+     │         │
+     └────┬────┘
+          ▼
+    Usage tracing
+          │
+          ▼
+ Python compatibility
+          │
+          ▼
+       Verdict
+          │
+     ┌────┼──────────────┐
+     ▼    ▼              ▼
+   SAFE REVIEW   LIKELY_BREAKING
+                    │
+                    ▼
+                  CI fails
+```
+
+With:
+
+```yaml
+fail-on: REVIEW
+```
+
+the workflow fails for:
+
+```text
+REVIEW
+LIKELY_BREAKING
+UNKNOWN
+```
+
+while allowing:
+
+```text
+SAFE
+```
+
+to pass.
+
+---
+
+## Quick Real-World Validation
+
+To test the lockfile parser against real dependency-update PRs, create:
+
+```text
+realworld/prs.txt
+```
+
+Add one GitHub PR URL per line:
+
+```text
+https://github.com/example/project/pull/123
+https://github.com/example/project/pull/456
+```
+
+Then run:
+
+```bash
 uv run python scripts/realworld.py fetch
 uv run python scripts/realworld.py report
 ```
 
-`fetch` downloads the before/after lockfiles into `realworld/data/` and
-`report` writes `realworld/report.md` and `realworld/report.json`, including
-any places where the parser fails or disagrees with the PR title.
+Results are written to:
 
-## API diff
-
-Compare the public API of two versions of a PyPI package:
-
-```
-uv run bumpcheck diff PACKAGE OLD_VERSION NEW_VERSION [--cache-dir PATH]
+```text
+realworld/report.md
+realworld/report.json
 ```
 
-BumpCheck downloads wheels only (never source distributions, and it never
-installs or imports the package), verifies their hashes, and unpacks them into
-a cache directory (`--cache-dir`, else `$BUMPCHECK_CACHE`, else
-`~/.cache/bumpcheck`). Packages without a usable wheel produce a
-`no_api_diff` result whose `reason` explains why.
+---
 
-## Usage tracer
+## Quick Benchmark
 
-Find where a repository's own Python code touches symbols from a package:
+To mine real Dependabot and Renovate dependency-update PRs:
 
-```
-uv run bumpcheck usage REPO_PATH PACKAGE --symbols SYM [--symbols SYM ...]
-uv run bumpcheck usage REPO_PATH PACKAGE --api-diff API_DIFF.json
-```
-
-`--api-diff` accepts an `ApiDiffResult` JSON file and traces every changed
-symbol, including parameter names and change kinds in the `parameters` field
-of the result. `--import-name` overrides the import name(s) used for matching;
-it may be repeated. Without `--api-diff`, the default import name is the
-package name with `-` replaced by `_`. With `--api-diff`, its `top_level`
-list supplies the default import names.
-
-The tracer is static: it parses Python files with `ast` and never imports or
-executes repository code. It reports `call`, `attribute`, `import`, and
-`reference` hits with a source snippet, keyword argument names, positional
-argument counts, star-argument flags, and an `exact` or `possible` confidence.
-It also reports risks that make a clean result unsafe to treat as proof:
-
-- `star_import`: `from package import *` makes names unresolvable.
-- `dynamic_getattr`: non-literal `getattr` on a package module.
-- `dynamic_import`: `importlib.import_module` / `__import__` with a package
-  name.
-- `dynamic_import_unknown_target`: a non-literal dynamic import.
-- `unparsable_file`: at least one file could not be parsed.
-- `scan_truncated`: the 5000-file cap was reached.
-- `method_target_untraced`: a method-like target had no related hits.
-
-Same-scope assignments of the form `x = PackageClass(...)` are tracked so
-`x.method()` and `x.attribute` resolve to the target symbol with `possible`
-confidence. Files are parsed as bytes with PEP 263 encoding detection; files
-larger than 2 MB and symlinks are skipped, and excluded directories include
-`.git`, `.venv`, `venv`, `node_modules`, `__pycache__`, `build`, `dist`, and
-`site-packages`.
-
-### Usage tracer limitations
-
-- Method calls on instances are only tracked for direct same-scope assignments
-  (`x = Target(...)`); cross-function flow and return values are not followed.
-- Re-exports through the user's own modules are not followed. A package's own
-  `__init__` re-exports are approximated by a final-segment fallback under the
-  import root, with `possible` confidence.
-- Transitive dependencies are not traced; only imports that resolve to the
-  requested package are considered.
-- Star imports, `getattr`, and dynamic imports are flagged as risks but their
-  concrete targets are not resolved.
-- The import table is file-level, not scope-aware, so shadowed or locally
-  imported names can produce conservative matches.
-- Package source is skipped only when the repository's `pyproject.toml`
-  `[project].name` canonicalizes to the requested package.
-
-## Verdicts and rules
-
-Classify every bump between two lockfiles against a repository:
-
-```
-uv run bumpcheck check REPO_PATH OLD NEW --kind uv.lock [--format json|text|markdown]
-uv run bumpcheck check REPO_PATH OLD NEW --kind uv.lock --fail-on REVIEW
+```bash
+uv run bumpcheck bench mine \
+  --out bench/v0-candidates \
+  --bot both \
+  --since 2026-01-01 \
+  --limit 60 \
+  --logs
 ```
 
-The pipeline parses the lockfiles, runs the API diff for each bumped package,
-traces usages in the repository, and applies the first matching rule:
+Then inspect candidates:
 
-| Rule | Condition | Verdict |
-| ---- | --------- | ------- |
-| R0 | A package has multiple versions or no comparable version | `UNKNOWN` |
-| R1 | The API diff returned `no_api_diff` | `UNKNOWN` |
-| R2 | The API diff is `ok` and has no changes | `SAFE` |
-| R3 | Changes exist but usage was not traced | `UNKNOWN` |
-| R4 | An exact-confidence hit matches breaking or high-severity changes | `LIKELY_BREAKING` / `REVIEW` |
-| R5 | Any other usage hit matches a change | `REVIEW` |
-| R6 | No matching hits, but a blocking risk exists | `REVIEW` |
-| R7 | No matching hits and no blocking risks | `SAFE` |
-| R8 | `requires_python` tightens support for a project Python version, or cannot be evaluated | `LIKELY_BREAKING` / `REVIEW` / `UNKNOWN` |
-| R9 | R7 would return `SAFE` but no Python files were scanned | `UNKNOWN` |
-| E1 | One bump raised an exception; other bumps still run | `UNKNOWN` |
-
-R4 marks `OBJECT_REMOVED` and `OBJECT_CHANGED_KIND` as `LIKELY_BREAKING`.
-`PARAMETER_REMOVED` is breaking when the call passes that keyword, and
-`PARAMETER_ADDED_REQUIRED` is breaking when the call omits it without star
-arguments or keyword splats. Other high-severity parameter changes are
-`REVIEW`. R6 blocking risks are `star_import`, `dynamic_getattr`,
-`dynamic_import`, `scan_truncated`, `method_target_untraced`, and
-`unparsable_file`; `dynamic_import_unknown_target` alone does not block `SAFE`.
-Overall severity is `LIKELY_BREAKING` > `REVIEW` > `UNKNOWN` > `SAFE`, so any
-`UNKNOWN` bump prevents an overall `SAFE`.
-
-R8 compares old and new `requires_python` over CPython 3.8–3.14. A tightened
-specifier that excludes a concrete CI or `.python-version` version is
-`LIKELY_BREAKING`; one that only narrows a declared `pyproject.toml`/`setup`
-range is `REVIEW`; an unevaluable specifier or unknown project set is `UNKNOWN`.
-Project Python resolution uses CI matrix first, then declared config, then
-`.python-version`. R9 prevents R7 from returning `SAFE` when zero Python files
-were scanned.
-
-### What SAFE does and does not mean
-
-`SAFE` means the API diff found no relevant changes and the static tracer found
-no direct usages that match them. It covers API signatures and direct static
-usage only. It does not prove behavioral compatibility, transitive breakage,
-runtime-only imports, or usage reached through untraced instance flow.
-
-## GitHub Action
-
-The root `action.yml` is a reusable composite action that compares the base
-and head versions of one lockfile, uploads a Markdown report, and posts a
-sticky pull request comment. This repository also uses it in
-`.github/workflows/bumpcheck-pr.yml`:
-
-```
-uses: Sushit-prog/Bumpcheck@main
-with:
-  github-token: ${{ secrets.GITHUB_TOKEN }}
-  lockfile: uv.lock
-  fail-on: REVIEW
+```bash
+uv run bumpcheck bench inspect \
+  acme/widgets#123 \
+  --dir bench/v0-candidates
 ```
 
-Inputs are `github-token`, `lockfile` (default `uv.lock`), `lock-kind`
-(auto-detected when empty), `fail-on` (default `REVIEW`), `comment` (default
-`true`), and `artifact-name`. Outputs are `overall`, `report-path`, and
-`exit-code`. The example above points at `Sushit-prog/Bumpcheck@main`, which
-matches this repository's `origin` and current `main` branch; this repository's
-own workflow uses `uses: ./` to test the local action. The action checks out the
-base ref for tooling and the PR head into a temporary path for static analysis,
-so the PR's code is never executed. A workflow using the action needs
-`contents: read` and `pull-requests: write`.
+Label them:
 
-## Benchmark
-
-Mine public Dependabot and Renovate pull requests into hand-labellable
-candidates:
-
-```
-uv run bumpcheck bench mine --out bench/v0-candidates --bot both \
-  --since 2026-01-01 --limit 60 --logs
+```bash
+uv run bumpcheck bench label \
+  --dir bench/v0-candidates
 ```
 
-The miner searches GitHub for closed single-package bump PRs in Python
-projects, keeps only PRs whose before/after lockfile parser output matches a
-single bumped package named in the title, and records the CI outcome for the
-head commit. It writes three files to `--out`:
+Evaluate the labeled dataset:
 
-- `candidates.jsonl`: one candidate per line, sorted by `case_id`. Every
-  candidate has a null `label` field, ready for hand labelling.
-- `excluded.jsonl`: every inspected PR that was rejected, with a reason:
-  `group_bump`, `not_single_package`, `non_python_package`,
-  `no_supported_lockfile`, `parse_mismatch`, `no_ci`,
-  `ci_not_attributable`, `closed_without_ci_signal`, `noise_repo`,
-  `repo_cap`, or `other`. Each record keeps the PR title so rejections can be
-  audited, and a short `detail` (at most 200 characters) explains
-  `parse_mismatch` (title vs. lockfile bumps), pending/failing check names for
-  `other`/`ci_not_attributable`, and exception type/message for `other`
-  (URL query strings stripped).
-- `summary.json`: counts per label suggestion, bot, split and exclusion
-  reason, plus distinct repos, API calls (`api_calls`), search requests
-  (`search_calls`), and the `retried`/`recovered` counters from
-  `--retry-excluded`.
-
-Renovate single-package bumps carry `autoclosed: true` when the title was
-decorated with `- autoclosed`; Dependabot titles do not set this flag. Renovate
-titles are stripped of trailing `- autoclosed`, `[SECURITY]`-style tags and
-`(major)`-style parenthesised decorations (repeatedly, never down to an empty
-title) before parsing. Parenthesised text inside the title is not stripped by
-that step, but text such as the `(fork)` in `Update dependency foo (fork) to v1`
-prevents the Renovate title from parsing, so the PR is excluded as
-`not_single_package`. Dependabot's
-`Bump X from A to B in the <group> group across N directories` form is treated
-as a single-package bump, not a group bump.
-
-Discovery walks fixed `--window-days` windows (default 7) from `--since` to
-`--until`, ordered deterministically by the SHA-256 of each window's start
-date so neighbouring requests are not adjacent dates. Windows are visited
-lazily and sequentially: for each window, each selected bot is searched
-(Dependabot first) for at most `--pages-per-window` pages (default 1, max 10),
-and items from each page are yielded sorted by `(created_at, number)` before
-the next bot or window is fetched. `--ci-status {any,failure,success}` (default
-`any`) adds GitHub's `status:` qualifier to the search and is copied into each
-candidate's `sampled_by`. `--limit` (default 60) counts candidates already
-stored in `candidates.jsonl` from earlier runs; discovery stops when that kept
-count is reached, while `--retry-excluded` recoveries may push it above the
-limit. `--max-per-repo` (default 3) caps kept candidates per repository,
-including earlier runs, and records over-cap hits as `repo_cap` before any PR
-request. There is no window splitting: pages are read only up to
-`--pages-per-window`, and GitHub's 1000-result search cap is not compensated
-for. The next window is fetched only when another item is needed, and reaching
-`--limit` stops all further search requests.
-
-Titles classified as single-package bumps whose package name contains `/` or
-starts with `@` (GitHub Actions/Docker references and npm scopes) are excluded
-as `non_python_package` before any per-PR request. `--dependabot-label TEXT`
-(default `python`; pass `""` to disable) appends `label:TEXT` to Dependabot
-search queries only; Renovate queries are unchanged.
-
-Repos matching a built-in noise list (for example repo names starting with
-`skills-`, plus `secure-code-game`, `codeql`, `copilot-codespaces`, `opensafely`)
-are recorded as `noise_repo` from search results alone, and a repo that already
-contributed `--max-per-repo` candidates (default 3) is recorded as `repo_cap`.
-Both checks run before any PR request, so they cost no API budget. Passing one
-or more `--skip-repo-pattern` regexes (case-insensitive) replaces the built-in
-list. A pattern that starts with a literal `^` and contains no `/` is matched
-against the bare repo name, so `^skills-` skips `someuser/skills-introduction`
-but keeps `skills-org/real-project`; `^acme` likewise excludes `x/acme-tools`
-but not `acme/widget`. Every other pattern is matched against the full
-`owner/name`, so `opensafely` still hits the owner and `^acme/` targets an
-owner explicitly. Only a leading literal `^` counts: an inline-flag form such
-as `(?i)^skills-` is treated as unanchored and matched against `owner/name`.
-`--ci-status {any,failure,success}` adds GitHub's `status:` qualifier to the
-search and is copied into each candidate's `sampled_by` field.
-
-`--retry-excluded REASON` (repeatable) re-processes stored `excluded.jsonl`
-entries with that reason in a separate pass before discovery, even when
-`--limit` is already met. Retried recoveries can therefore push the kept count
-above `--limit`; discovery only runs when the kept count is still below it.
-Each selected entry is handled in sorted `case_id` order directly from its
-stored `repo` and `pr_number`: a stored title is re-classified without a
-request and the PR is fetched only if it now looks like a single-package bump,
-while a legacy entry without a title first fetches `/pulls/{n}` once to read
-the title and author login (the fetched title is stored even if the entry stays
-excluded). Recovered entries go through the normal per-PR pipeline and move to
-`candidates.jsonl`; anything that fails again is re-excluded with its new
-reason and `detail`. The same noise-repo patterns and `--max-per-repo` cap
-apply, and progress lines are prefixed `[retry]`. Entries not selected by
-`--retry-excluded` are untouched.
-
-CI outcomes are noisy suggestions, not labels. `OK_SUSPECT` means every
-signal-bearing check passed on a merged PR, `BROKE_SUSPECT` means at least one
-non-lint check failed with a `regression` or `no_base_run` comparison, and
-`UNCLEAR` covers everything else (for example a
-passing PR that was closed without merging). For failing checks the same check
-is compared against the base commit (`base_ci_checks`, `failure_vs_base`):
-a `regression` (passed at base) or a check with `no_base_run` keeps
-`BROKE_SUSPECT`, while failures that were already `preexisting` at base are
-downgraded to `UNCLEAR`. Cancelled, skipped, neutral and
-stale conclusions are ignored; PRs with pending checks are excluded. Every
-candidate still needs hand verification.
-
-With `--logs`, each failing check yields a `failure_excerpts` entry whose
-`log_status` is `matched` (package-specific exception lines were found),
-`fetched_no_match`, or `unavailable` (no job id or the log could not be
-fetched; `--logs` itself requires `GITHUB_TOKEN`). For `BROKE_SUSPECT` merged
-PRs, `later_fix_commits`
-lists commits after the merge that touch the lockfile or mention the package;
-the PR's own merge commit, messages that merge this PR (`#<number>`), and
-commits dated at or before the merge/close time are filtered out.
-
-Responses are cached under `.bumpcheck-cache/github/` (override with
-`--cache-dir`), and `--offline` replays a warm cache without touching the
-network. `GITHUB_TOKEN` is optional but required for `--logs` and for usable
-rate limits (see [Credentials](#credentials)); it is never written to the cache
-or to any output file. Requests are
-spaced at least 1 second apart (search at least 3), transient network errors
-are retried up to four times with jittered exponential backoff, and
-rate-limit 403/429 responses are retried with the API's own retry hint (or a
-doubling backoff, up to four retries) before failing with the API's message.
-A computed rate-limit wait longer than `--max-rate-limit-wait` (default 900
-seconds) is not attempted: the command exits 3 with the reset time instead.
-Rerunning
-into the same `--out` skips cases that are already recorded; `--limit` counts
-those earlier candidates too. Each processed PR prints one progress line to
-stderr, and both JSONL files are rewritten atomically (temp file + replace)
-after every case, so pressing Ctrl-C saves what has been mined, writes
-`summary.json`, and exits with code 130; a rerun resumes from that state.
-
-The `dev`/`test` split is assigned deterministically per repository
-(`sha256(repo)` first byte below 77 means `test`, about 30%), so reruns and
-resumed runs keep the same split and no PR leaks between splits. Discovery uses
-the same fixed `--window-days` windows and SHA-256 ordering described above for
-every selected bot: all items from one window are yielded, sorted by
-`created_at` and PR number, before later windows are visited. Windows are never
-split in half; `--pages-per-window` is the only page bound, and a day with more
-than 1000 matching PRs is still truncated by GitHub's own search results.
-
-### Labeling rules
-
-Hand-label mined candidates in a store separate from `candidates.jsonl`:
-
+```bash
+uv run bumpcheck bench eval \
+  --dir bench/v0-candidates
 ```
+
+Generate the report:
+
+```bash
+uv run bumpcheck bench report \
+  --dir bench/v0-candidates
+```
+
+---
+
+# Why BumpCheck?
+
+Automated dependency updates create a simple but important question:
+
+> **Can this dependency update safely merge?**
+
+A version change alone cannot answer that.
+
+BumpCheck looks at the actual relationship between:
+
+- the package version that changed
+- the package's public API
+- the symbols your repository uses
+- the way those symbols are called
+- the Python versions your project supports
+- static-analysis limitations and risks
+
+The result is a more evidence-based signal than simply classifying updates by semantic versioning.
+
+---
+
+# Key Features
+
+- 🔍 Public API diffing between PyPI versions
+- 🧭 Static Python usage tracing
+- 🔐 No package installation or importing during API analysis
+- 📦 Wheel-only analysis with hash verification
+- 🐍 `requires_python` compatibility analysis
+- 📋 `SAFE`, `REVIEW`, `LIKELY_BREAKING`, and `UNKNOWN` verdicts
+- 🤖 Dependabot and Renovate PR analysis
+- ⚙️ Reusable GitHub composite action
+- 📊 Benchmark mining and evaluation
+- 🧪 Acceptance tests against known breaking releases
+- 💾 Offline cache support
+- 🛡️ Repository code is never executed
+- 🚦 Configurable CI failure thresholds
+
+---
+
+# How It Works
+
+```text
+Dependency update
+       │
+       ▼
+   Lockfile
+    parsing
+       │
+       ▼
+   API diff
+       │
+       ▼
+ Usage tracing
+       │
+       ▼
+Python support
+   analysis
+       │
+       ▼
+  Safety rules
+       │
+       ▼
+    Verdict
+```
+
+BumpCheck intentionally prefers uncertainty over false safety.
+
+If the available static evidence is insufficient to establish that an update is safe, it returns `UNKNOWN` or `REVIEW` instead of claiming `SAFE`.
+
+---
+
+# Verdicts
+
+| Verdict | Meaning |
+|---|---|
+| `SAFE` | No relevant API changes or blocking risks were found |
+| `REVIEW` | A change or analysis risk requires human review |
+| `LIKELY_BREAKING` | Strong evidence indicates the update can break the repository |
+| `UNKNOWN` | BumpCheck could not establish a reliable result |
+
+Severity is ordered as:
+
+```text
+LIKELY_BREAKING > REVIEW > UNKNOWN > SAFE
+```
+
+Therefore, an `UNKNOWN` dependency bump prevents an overall `SAFE` result.
+
+---
+
+# What `SAFE` Does and Does Not Mean
+
+`SAFE` means:
+
+> **The API diff found no relevant changes, and static analysis found no matching direct usage or blocking risks.**
+
+It does not prove:
+
+- behavioral compatibility
+- runtime-only imports
+- transitive dependency compatibility
+- hidden dynamic usage
+- untraced instance flow
+- application-level semantic correctness
+
+BumpCheck is a compatibility signal, not a replacement for tests or CI.
+
+---
+
+# API Diff
+
+Compare two versions of a PyPI package:
+
+```bash
+bumpcheck diff PACKAGE OLD_VERSION NEW_VERSION
+```
+
+Example:
+
+```bash
+bumpcheck diff requests 2.31.0 2.32.0
+```
+
+Cache location:
+
+```bash
+--cache-dir PATH
+```
+
+or:
+
+```bash
+BUMPCHECK_CACHE
+```
+
+Packages without a usable wheel produce:
+
+```text
+no_api_diff
+```
+
+with a reason explaining why.
+
+---
+
+# Usage Tracer
+
+Find where repository Python code touches package symbols:
+
+```bash
+bumpcheck usage REPO_PATH PACKAGE --symbols SYMBOL
+```
+
+Or use an API diff:
+
+```bash
+bumpcheck usage REPO_PATH PACKAGE \
+  --api-diff API_DIFF.json
+```
+
+The tracer reports:
+
+- calls
+- attributes
+- imports
+- references
+- keyword arguments
+- positional argument counts
+- star-argument usage
+- `exact` or `possible` confidence
+
+The analysis is performed using Python's `ast` module.
+
+Repository code is never imported or executed.
+
+---
+
+# Usage Tracer Risks
+
+BumpCheck reports analysis conditions that can make a clean result unsafe to treat as proof:
+
+| Risk | Meaning |
+|---|---|
+| `star_import` | `from package import *` prevents reliable name resolution |
+| `dynamic_getattr` | Non-literal `getattr()` is used on a package module |
+| `dynamic_import` | Dynamic import targets the package |
+| `dynamic_import_unknown_target` | Dynamic import target cannot be determined |
+| `unparsable_file` | A Python file could not be parsed |
+| `scan_truncated` | The 5,000-file scan cap was reached |
+| `method_target_untraced` | A method-like target could not be associated with a usage |
+
+Blocking risks cause BumpCheck to prefer `REVIEW` over `SAFE`.
+
+---
+
+# Python Compatibility
+
+BumpCheck evaluates `requires_python` across CPython 3.8–3.14.
+
+Project Python versions are resolved using:
+
+1. CI matrices
+2. declared project configuration
+3. `.python-version`
+
+A dependency that drops support for a concrete Python version used by the project can therefore produce:
+
+```text
+LIKELY_BREAKING
+```
+
+Unevaluable compatibility produces:
+
+```text
+UNKNOWN
+```
+
+---
+
+# GitHub Action
+
+The root `action.yml` provides a reusable composite action.
+
+Inputs:
+
+| Input | Default | Description |
+|---|---|---|
+| `github-token` | — | GitHub authentication |
+| `lockfile` | `uv.lock` | Lockfile to analyze |
+| `lock-kind` | auto | Lockfile type |
+| `fail-on` | `REVIEW` | Failure threshold |
+| `comment` | `true` | Post PR comment |
+| `artifact-name` | — | Artifact name |
+
+Outputs:
+
+| Output | Description |
+|---|---|
+| `overall` | Overall verdict |
+| `report-path` | Generated report |
+| `exit-code` | Process exit code |
+
+Required GitHub permissions:
+
+```yaml
+permissions:
+  contents: read
+  pull-requests: write
+```
+
+---
+
+# Benchmark
+
+BumpCheck includes tooling for mining real-world Dependabot and Renovate pull requests.
+
+```bash
+uv run bumpcheck bench mine \
+  --out bench/v0-candidates \
+  --bot both \
+  --since 2026-01-01 \
+  --limit 60 \
+  --logs
+```
+
+The miner produces:
+
+```text
+candidates.jsonl
+excluded.jsonl
+summary.json
+```
+
+CI outcomes are treated as signals rather than ground-truth labels.
+
+Every candidate still requires human verification.
+
+---
+
+# Labeling
+
+```bash
 uv run bumpcheck bench label --dir bench/v0-candidates
+```
+
+Statistics:
+
+```bash
 uv run bumpcheck bench label-stats --dir bench/v0-candidates
+```
+
+Agreement:
+
+```bash
 uv run bumpcheck bench agreement --dir bench/v0-candidates
 ```
 
-`labels.jsonl` holds one JSON object per `(case_id, round)`, rewritten
-atomically after every label. `BROKE` requires a `break_category`, an
-`evidence_kind`, and non-empty evidence tying the failure to the **bumped
-package**: an error naming its symbols (`log_names_package`), an install error
-for it (`install_error`), a maintainer fix in a later commit
-(`maintainer_fix`), a local reproduction (`reproduced_locally`), or
-`Requires-Python`/dependency metadata from the new release (`pypi_metadata`).
-A failing check alone is never enough. A failure already present on the base commit is
-`EXCLUDE` with `preexisting_failure`, not `BROKE`. `OK` is only allowed for a
-merged PR whose `ci_summary` is `all_passed`; closed-unmerged and `autoclosed`
-PRs can never be `OK` and are normally `EXCLUDE` (`superseded`) or `BROKE` with
-evidence. `EXCLUDE` always needs a reason and evidence.
+`BROKE` labels require evidence connecting the failure to the bumped package.
 
-The miner's `label_suggestion` is hidden by default so the reviewer is not
-anchored on its judgement (`--show-suggestion` reveals it). Hiding it mitigates
-anchoring but does not remove it: check conclusions are still displayed and can
-influence the decision. Use `bench label --round 2` at least a week later to
-re-label a random 20% of the round-1 `BROKE`/`OK` cases (`--sample 0.2 --seed
-42`), optionally restricted with `--round1-label BROKE`, then report raw
-agreement and Cohen's kappa from `bench agreement`. `--only` filters by miner
-suggestion, and repeatable `--also-dir DIR` skips case_ids already labeled for
-that round in another store. Labels are never saved for a case already labeled
-in the selected round; re-labeling the same `(case_id, round)` replaces it.
+A failing CI check alone is not sufficient evidence.
 
-### Inspecting candidates
+---
 
-Print a read-only report for one mined case. No candidate or label files are
-written; only the response cache may be updated:
+# Evaluation
 
-```
-uv run bumpcheck bench inspect acme/widgets#123 --dir bench/v0-candidates
+Create snapshots:
+
+```bash
+uv run bumpcheck bench snapshot \
+  --dir bench/v0-candidates
 ```
 
-The report includes the PR header, PyPI `requires_python` and dependency changes
-for both versions, workflow triggers/jobs/python-version matrices and relevant
-`run:` lines, a package-filtered lockfile diff, Python-version verdict hints
-against the new release's `requires_python`, and inferred workflow/job locations
-for failing checks. `--also-dir DIR` (repeatable) falls back to other candidate
-stores when the case is missing from `--dir`. `--offline` replays the response
-cache only; `--cache-dir` selects the cache directory (default
-`.bumpcheck-cache/github`). Batch inspection is available as
-`bumpcheck bench inspect-batch --dir DIR --out PATH`.
+Evaluate:
 
-### Snapshot, eval and report
-
-Fetch offline snapshots, evaluate labeled cases against them, then write the
-Markdown report:
-
-```
-uv run bumpcheck bench snapshot --dir bench/v0-candidates
-uv run bumpcheck bench eval --dir bench/v0-candidates [--split dev|test|all]
-uv run bumpcheck bench report --dir bench/v0-candidates [--split dev|test|all]
+```bash
+uv run bumpcheck bench eval \
+  --dir bench/v0-candidates
 ```
 
-`--split` defaults to `dev` for both `eval` and `report`; `all` includes both
-splits. The test split is evaluated once at the end; pass `--split test` only
-for that.
+Generate the report:
 
-### v0.1 validation
+```bash
+uv run bumpcheck bench report \
+  --dir bench/v0-candidates
+```
 
-The v0.1 rules were frozen after dev labeling at commit `953b0bc`; the held-out
-test split was labeled and evaluated once afterward. This is a small,
-failure-enriched, single-annotator benchmark, so these raw counts are not an
-accuracy estimate for real-world traffic. The test split contained no
-hand-labeled `BROKE` cases, so recall and false-safe rate are not measurable
-there.
+The benchmark supports `dev`, `test`, and `all` splits.
 
-| split | BROKE/OK evaluated | false-safe | breakage recall | SAFE precision | UNKNOWN |
-| ----- | ------------------ | ---------- | --------------- | -------------- | ------- |
-| dev | 5/23 | 0/5 | 5/5 | 15/15 | 4/28 |
-| test | 0/21 | n/a | n/a | 13/13 | 3/21 |
-| all | 5/44 | 0/5 | 5/5 | 28/28 | 7/49 |
+---
 
-All five `BROKE` cases are `python_version_support` failures detected from
-`requires_python` metadata. Two dev cases failed snapshot ingestion and are
-reported separately, never counted as `SAFE`; the held-out split had no
-evaluation errors.
+# Acceptance Tests
 
-## Credentials
+Known breaking releases are listed in:
 
-GitHub commands read `GITHUB_TOKEN` from a `.env`-style file at startup. Files
-are checked in this order, and the first non-empty token wins:
+```text
+acceptance/pairs.json
+```
 
-1. the file named by `BUMPCHECK_ENV_FILE` (it must exist, or the command exits 2)
+Run:
+
+```bash
+uv run python scripts/apidiff_acceptance.py run
+```
+
+Results are written to:
+
+```text
+acceptance/report.md
+acceptance/report.json
+```
+
+---
+
+# Real-World Validation
+
+Create:
+
+```text
+realworld/prs.txt
+```
+
+with one dependency-update PR URL per line.
+
+Then:
+
+```bash
+uv run python scripts/realworld.py fetch
+uv run python scripts/realworld.py report
+```
+
+Output:
+
+```text
+realworld/report.md
+realworld/report.json
+```
+
+---
+
+# Credentials
+
+GitHub operations use `GITHUB_TOKEN`.
+
+BumpCheck checks:
+
+1. `BUMPCHECK_ENV_FILE`
 2. `~/.bumpcheck/.env`
-3. `./.env` in the current directory (last, so a cloned repo cannot override
-   your own token)
+3. `./.env`
 
-A non-empty `GITHUB_TOKEN` already in the real environment always wins over
-every file; an empty or whitespace-only value counts as unset. Only
-`GITHUB_TOKEN` is ever read from these files: every other key (`PATH`,
-`PYTHONPATH`, proxy variables, ...) is ignored, so a hostile repository cannot
-change how the command runs. Values are used verbatim: no variable expansion
-and no multi-line values. On POSIX, a file readable by group or others prints a
-one-line warning; restrict it with `chmod 600`.
+A real environment variable takes precedence.
 
-Without a token, requests are unauthenticated (60 per hour). `bench mine` and
-`bench inspect` print a warning and exit 2 unless you pass
-`--allow-unauthenticated`; `--offline` skips the check entirely. A token that
-GitHub rejects (401) exits 2 with a clear message. Use
-`--max-rate-limit-wait SECONDS` (default 900, `0` fails immediately) to cap
-rate-limit waits; exceeding it exits 3 and prints the reset time. Run
-`bumpcheck --verbose ...` to see which file supplied the token (the value is
-never printed).
+Example:
 
-```
-# ~/.bumpcheck/.env, outside any repository you commit
+```dotenv
 GITHUB_TOKEN=ghp_your_token_here
 ```
 
-Never commit the file. This project's `.gitignore` already ignores `.env` and
-`.env.*`; keep the token in `~/.bumpcheck/.env` or point
-`BUMPCHECK_ENV_FILE` at a file outside the repository.
+Never commit the token.
 
-## Acceptance run
+For POSIX systems:
 
-Check the API diff against known breaking releases listed in
-`acceptance/pairs.json` (each entry names the package, both versions, the
-expected breakages, and a source link). This fetches wheels from PyPI:
-
-```
-uv run python scripts/apidiff_acceptance.py run [--pairs PATH] [--cache-dir PATH] [--only PACKAGE]
+```bash
+chmod 600 ~/.bumpcheck/.env
 ```
 
-Each expectation is reported as `HIT` or `MISS`; a pair whose comparison is
-impossible is reported as `NO_API_DIFF` with its reason, and any other failure
-as `ERROR` without aborting the run. Results are written to
-`acceptance/report.md` and `acceptance/report.json`.
+BumpCheck never writes the token to cache or output files.
 
+---
+
+# Security Model
+
+BumpCheck is deliberately designed not to execute target repository code.
+
+API analysis:
+
+```text
+PyPI wheel
+    │
+    ▼
+Hash verification
+    │
+    ▼
+Wheel extraction
+    │
+    ▼
+Static API analysis
+```
+
+Repository analysis:
+
+```text
+Python source
+     │
+     ▼
+AST parsing
+     │
+     ▼
+Static symbol matching
+```
+
+There is no requirement to install or import the dependency being analyzed.
+
+---
+
+# Limitations
+
+BumpCheck currently focuses on direct static Python usage.
+
+It does not fully resolve:
+
+- cross-function data flow
+- return-value flow
+- user-module re-exports
+- transitive dependencies
+- dynamic imports
+- dynamic attribute access
+- arbitrary runtime behavior
+
+Files larger than 2 MB and symlinks are skipped, and the scan is capped at 5,000 files.
+
+These limitations are surfaced as analysis risks rather than silently ignored.
+
+---
+
+# Project Status
+
+**Early development — `v0.1.2`**
+
+The current release focuses on establishing a conservative dependency-safety pipeline combining:
+
+```text
+Lockfile analysis
+        +
+API diffing
+        +
+Static usage tracing
+        +
+Python compatibility
+        +
+Explicit risk rules
+        =
+Dependency-update verdict
+```
+
+The benchmark is currently small and should not be interpreted as production-grade accuracy.
+
+---
+
+# License
+
+MIT License.
