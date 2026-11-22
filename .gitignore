@@ -29,6 +29,11 @@ uv.toml
 realworld/data/
 realworld/report.*
 
+bench/**/snapshots/
+bench/**/eval/*
+!bench/**/eval/test_runs.log
+bench/**/inspect-*.txt
+
 acceptance/report.*
 
 .DS_Store

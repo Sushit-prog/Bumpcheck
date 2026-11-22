@@ -42,6 +42,8 @@ def _validate_expect(item: object, pair_index: int, index: int) -> dict:
     _require(isinstance(item["symbol"], str), f"{where} field 'symbol' must be a string")
     kind = item.get("kind")
     parameter = item.get("parameter")
+    known_miss = item.get("known_miss", False)
+    known_miss_reason = item.get("known_miss_reason")
     _require(
         kind is None or isinstance(kind, str), f"{where} field 'kind' must be a string or null"
     )
@@ -49,7 +51,18 @@ def _validate_expect(item: object, pair_index: int, index: int) -> dict:
         parameter is None or isinstance(parameter, str),
         f"{where} field 'parameter' must be a string or null",
     )
-    return {"symbol": item["symbol"], "kind": kind, "parameter": parameter}
+    _require(isinstance(known_miss, bool), f"{where} field 'known_miss' must be a boolean")
+    _require(
+        known_miss_reason is None or isinstance(known_miss_reason, str),
+        f"{where} field 'known_miss_reason' must be a string or null",
+    )
+    return {
+        "symbol": item["symbol"],
+        "kind": kind,
+        "parameter": parameter,
+        "known_miss": known_miss,
+        "known_miss_reason": known_miss_reason,
+    }
 
 
 def _validate_pair(entry: object, index: int) -> dict:
@@ -167,6 +180,7 @@ def evaluate(pairs: list[dict], cache_dir: Path | None, only: str | None = None)
         "expectations": sum(len(pair["expectations"]) for pair in evaluated),
         "hits": 0,
         "misses": 0,
+        "known_misses": 0,
         "errors": 0,
         "no_api_diff": {},
     }
@@ -177,11 +191,66 @@ def evaluate(pairs: list[dict], cache_dir: Path | None, only: str | None = None)
             reason = pair["reason"] or "unknown"
             summary["no_api_diff"][reason] = summary["no_api_diff"].get(reason, 0) + 1
         for expectation in pair["expectations"]:
-            if expectation["result"] == "HIT":
+            result = expectation["result"]
+            if result == "HIT":
                 summary["hits"] += 1
-            elif expectation["result"] == "MISS":
+            elif result == "MISS":
                 summary["misses"] += 1
+            if expectation.get("known_miss") and result != "HIT":
+                summary["known_misses"] += 1
+    total = summary["expectations"]
+    summary["recall"] = summary["hits"] / total if total else None
     return {"summary": summary, "pairs": evaluated}
+
+
+def _format_recall(summary: dict) -> str:
+    total = summary["expectations"]
+    if total == 0:
+        return "n/a"
+    return f"{summary['hits']}/{total} ({summary['recall']:.3f})"
+
+
+def _md_cell(value: str | None) -> str:
+    return str(value or "").replace("|", "\\|").replace("\n", " ")
+
+
+def render_text(report: dict) -> str:
+    lines: list[str] = []
+    for pair in report["pairs"]:
+        lines.append(f"{pair['package']} {pair['old']} -> {pair['new']}: {pair['status']}")
+        if pair["reason"]:
+            lines.append(f"  reason: {pair['reason']}")
+        if pair["error"]:
+            lines.append(f"  error: {pair['error']}")
+        for expectation in pair["expectations"]:
+            marker = " [known_miss]" if expectation.get("known_miss") else ""
+            kind = expectation["kind"] or "-"
+            parameter = (
+                f" (parameter={expectation['parameter']})" if expectation["parameter"] else ""
+            )
+            lines.append(
+                f"  {expectation['symbol']} {kind}{parameter}: {expectation['result']}{marker}"
+            )
+    for pair in report["pairs"]:
+        for expectation in pair["expectations"]:
+            if not expectation.get("known_miss") or expectation["result"] != "HIT":
+                continue
+            reason = expectation.get("known_miss_reason")
+            suffix = f": {reason}" if reason else ""
+            lines.append(
+                f"note: {pair['package']} {pair['old']} -> {pair['new']} "
+                f"{expectation['symbol']} is marked known_miss but now HITs{suffix}"
+            )
+    return "\n".join(lines)
+
+
+def summary_line(summary: dict) -> str:
+    no_api_diff = sum(summary["no_api_diff"].values())
+    return (
+        f"acceptance: hits={summary['hits']} misses={summary['misses']} "
+        f"known_misses={summary['known_misses']} errors={summary['errors']} "
+        f"no_api_diff={no_api_diff} recall={_format_recall(summary)}"
+    )
 
 
 def render_markdown(report: dict) -> str:
@@ -192,14 +261,17 @@ def render_markdown(report: dict) -> str:
     lines.append(f"- expectations: {summary['expectations']}")
     lines.append(f"- hits: {summary['hits']}")
     lines.append(f"- misses: {summary['misses']}")
+    lines.append(f"- known_misses: {summary['known_misses']}")
     lines.append(f"- errors: {summary['errors']}")
+    no_api_diff = sum(summary["no_api_diff"].values())
     if summary["no_api_diff"]:
         rendered = ", ".join(
             f"{reason}={count}" for reason, count in sorted(summary["no_api_diff"].items())
         )
-        lines.append(f"- no_api_diff: {rendered}")
+        lines.append(f"- no_api_diff: {no_api_diff} ({rendered})")
     else:
-        lines.append("- no_api_diff: none")
+        lines.append("- no_api_diff: 0")
+    lines.append(f"- recall: {_format_recall(summary)}")
     lines.append("")
 
     for pair in report["pairs"]:
@@ -216,15 +288,18 @@ def render_markdown(report: dict) -> str:
             lines.append(f"- note: {pair['note']}")
         lines.append(f"- changes: {pair['change_count']}")
         lines.append("")
-        lines.append("| symbol | kind | parameter | result |")
-        lines.append("| --- | --- | --- | --- |")
+        lines.append("| symbol | kind | parameter | result | known_miss | known_miss_reason |")
+        lines.append("| --- | --- | --- | --- | --- | --- |")
         for expectation in pair["expectations"]:
+            known = "yes" if expectation.get("known_miss") else ""
             lines.append(
-                "| {symbol} | {kind} | {parameter} | {result} |".format(
-                    symbol=expectation["symbol"],
-                    kind=expectation["kind"] or "",
-                    parameter=expectation["parameter"] or "",
+                "| {symbol} | {kind} | {parameter} | {result} | {known} | {reason} |".format(
+                    symbol=_md_cell(expectation["symbol"]),
+                    kind=_md_cell(expectation["kind"]),
+                    parameter=_md_cell(expectation["parameter"]),
                     result=expectation["result"],
+                    known=known,
+                    reason=_md_cell(expectation.get("known_miss_reason")),
                 )
             )
         lines.append("")
@@ -268,18 +343,29 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
-        report = run(args.pairs, args.cache_dir, args.only)
+        report = run(
+            args.pairs,
+            args.cache_dir,
+            args.only,
+            report_md=REPORT_MD,
+            report_json=REPORT_JSON,
+        )
     except PairsError as exc:
         print(f"invalid pairs file: {exc}", file=sys.stderr)
         return 2
 
     summary = report["summary"]
-    print(
-        f"acceptance: {summary['pairs']} pair(s), {summary['expectations']} expectation(s), "
-        f"{summary['hits']} hit(s), {summary['misses']} miss(es), "
-        f"{summary['errors']} error(s)"
+    for line in render_text(report).splitlines():
+        print(line)
+    print(summary_line(summary))
+
+    failed_expectation = any(
+        expectation["result"] != "HIT" and not expectation.get("known_miss", False)
+        for pair in report["pairs"]
+        for expectation in pair["expectations"]
     )
-    return 0
+    failed_pair = summary["errors"] > 0 or bool(summary["no_api_diff"])
+    return 1 if failed_expectation or failed_pair else 0
 
 
 if __name__ == "__main__":

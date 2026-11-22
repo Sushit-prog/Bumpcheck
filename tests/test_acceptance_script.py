@@ -95,6 +95,76 @@ def _run(tmp_path: Path, pairs: list[dict], mapping: dict, **kwargs):
     return report, monkeypatch_fake
 
 
+def _expectation(
+    symbol: str,
+    result: str,
+    *,
+    known_miss: bool = False,
+    known_miss_reason: str | None = None,
+) -> dict:
+    return {
+        "symbol": symbol,
+        "kind": None,
+        "parameter": None,
+        "result": result,
+        "known_miss": known_miss,
+        "known_miss_reason": known_miss_reason,
+    }
+
+
+def _pair_result(
+    package: str,
+    status: str = "ok",
+    *,
+    expectations: tuple[dict, ...] = (),
+    reason: str | None = None,
+    error: str | None = None,
+) -> dict:
+    return {
+        "package": package,
+        "old": "1.0.0",
+        "new": "2.0.0",
+        "status": status,
+        "reason": reason,
+        "error": error,
+        "expectations": list(expectations),
+    }
+
+
+def _report(pairs: list[dict]) -> dict:
+    expectations = [item for pair in pairs for item in pair["expectations"]]
+    hits = sum(item["result"] == "HIT" for item in expectations)
+    misses = sum(item["result"] == "MISS" for item in expectations)
+    known_misses = sum(
+        item.get("known_miss", False) and item["result"] != "HIT" for item in expectations
+    )
+    errors = sum(pair["status"] == "error" for pair in pairs)
+    no_api_diff: dict[str, int] = {}
+    for pair in pairs:
+        if pair["status"] == "no_api_diff":
+            reason = pair["reason"] or "unknown"
+            no_api_diff[reason] = no_api_diff.get(reason, 0) + 1
+    total = len(expectations)
+    return {
+        "summary": {
+            "pairs": len(pairs),
+            "expectations": total,
+            "hits": hits,
+            "misses": misses,
+            "known_misses": known_misses,
+            "errors": errors,
+            "no_api_diff": no_api_diff,
+            "recall": hits / total if total else None,
+        },
+        "pairs": pairs,
+    }
+
+
+def _run_main(monkeypatch, report: dict) -> int:
+    monkeypatch.setattr(acceptance, "run", lambda *args, **kwargs: report)
+    return acceptance.main(["run"])
+
+
 def test_hit_miss_no_api_diff_and_error(tmp_path: Path) -> None:
     pairs = [
         _pair(
@@ -163,7 +233,7 @@ def test_hit_miss_no_api_diff_and_error(tmp_path: Path) -> None:
     markdown = (tmp_path / "report.md").read_text(encoding="utf-8")
     assert "## Summary" in markdown
     assert "pkg-a 1.0.0 -> 2.0.0" in markdown
-    assert "| pkg_a.foo | PARAMETER_REMOVED | label | HIT |" in markdown
+    assert "| pkg_a.foo | PARAMETER_REMOVED | label | HIT |  |  |" in markdown
 
 
 def test_top_changes_are_capped_and_ranked(tmp_path: Path) -> None:
@@ -229,19 +299,109 @@ def test_wrong_shape_pairs_file_is_invalid(tmp_path: Path) -> None:
     assert acceptance.main(["run", "--pairs", str(path)]) == 2
 
 
-def test_main_returns_zero_on_success(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(
-        acceptance,
-        "run",
-        lambda *args, **kwargs: {
-            "summary": {
-                "pairs": 0,
-                "expectations": 0,
-                "hits": 0,
-                "misses": 0,
-                "errors": 0,
-                "no_api_diff": {},
-            }
-        },
+def test_main_returns_zero_on_success(monkeypatch, capsys) -> None:
+    report = _report([_pair_result("pkg-a", expectations=(_expectation("pkg_a.foo", "HIT"),))])
+
+    assert _run_main(monkeypatch, report) == 0
+    assert "recall=1/1 (1.000)" in capsys.readouterr().out
+
+
+def test_known_miss_does_not_fail_exit_code(monkeypatch, capsys) -> None:
+    report = _report(
+        [
+            _pair_result(
+                "pkg-a",
+                expectations=(
+                    _expectation(
+                        "pkg_a.gone",
+                        "MISS",
+                        known_miss=True,
+                        known_miss_reason="changelog confirms removal",
+                    ),
+                ),
+            )
+        ]
     )
-    assert acceptance.main(["run"]) == 0
+
+    assert _run_main(monkeypatch, report) == 0
+    output = capsys.readouterr().out
+    assert "pkg_a.gone -: MISS [known_miss]" in output
+    assert "known_misses=1" in output
+
+
+def test_known_miss_counts_against_recall(monkeypatch, capsys) -> None:
+    report = _report(
+        [
+            _pair_result(
+                "pkg-a",
+                expectations=(
+                    _expectation("pkg_a.hit", "HIT"),
+                    _expectation("pkg_a.gone", "MISS", known_miss=True),
+                ),
+            )
+        ]
+    )
+
+    assert _run_main(monkeypatch, report) == 0
+    output = capsys.readouterr().out
+    assert "hits=1 misses=1 known_misses=1 errors=0 no_api_diff=0 recall=1/2 (0.500)" in output
+
+
+def test_unexpected_miss_exits_one(monkeypatch, capsys) -> None:
+    report = _report([_pair_result("pkg-a", expectations=(_expectation("pkg_a.gone", "MISS"),))])
+
+    assert _run_main(monkeypatch, report) == 1
+    output = capsys.readouterr().out
+    assert "hits=0 misses=1 known_misses=0 errors=0 no_api_diff=0" in output
+
+
+def test_known_miss_now_hit_prints_note(monkeypatch, capsys) -> None:
+    report = _report(
+        [
+            _pair_result(
+                "pkg-a",
+                expectations=(
+                    _expectation(
+                        "pkg_a.gone",
+                        "HIT",
+                        known_miss=True,
+                        known_miss_reason="fixed upstream",
+                    ),
+                ),
+            )
+        ]
+    )
+
+    assert _run_main(monkeypatch, report) == 0
+    output = capsys.readouterr().out
+    assert "marked known_miss but now HITs: fixed upstream" in output
+    assert "known_misses=0" in output
+
+
+def test_error_and_no_api_diff_reported_separately_from_misses(monkeypatch, capsys) -> None:
+    report = _report(
+        [
+            _pair_result(
+                "pkg-error",
+                "error",
+                expectations=(_expectation("pkg_error.foo", "ERROR"),),
+                error="RuntimeError: boom",
+            ),
+            _pair_result(
+                "pkg-no-wheel",
+                "no_api_diff",
+                expectations=(_expectation("pkg_no_wheel.foo", "NO_API_DIFF"),),
+                reason="no_wheel",
+            ),
+            _pair_result(
+                "pkg-miss",
+                expectations=(_expectation("pkg_miss.foo", "MISS"),),
+            ),
+        ]
+    )
+
+    assert _run_main(monkeypatch, report) == 1
+    output = capsys.readouterr().out
+    assert "hits=0 misses=1 known_misses=0 errors=1 no_api_diff=1" in output
+    assert "error: RuntimeError: boom" in output
+    assert "reason: no_wheel" in output

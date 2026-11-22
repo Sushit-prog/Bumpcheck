@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from importlib.metadata import version as dist_version
 from pathlib import Path
 
 from typer.testing import CliRunner
@@ -98,4 +99,4 @@ def test_cli_version() -> None:
     result = CliRunner().invoke(app, ["--version"])
 
     assert result.exit_code == 0
-    assert "0.0.1" in result.output
+    assert result.output.strip() == dist_version("bumpcheck-py")
