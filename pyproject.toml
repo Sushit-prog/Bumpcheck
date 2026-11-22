@@ -1,6 +1,6 @@
 [project]
 name = "bumpcheck-py"
-version = "0.1.1"
+version = "0.1.2"
 description = "Analyze whether a dependency bump will break your code."
 readme = "README.md"
 authors = [
