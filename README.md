@@ -1,6 +1,15 @@
 BumpCheck analyzes whether a dependency bump in a Dependabot or Renovate pull request will break your code.
 
-Status: early development (v0.1.0)
+Status: early development (v0.1.1)
+
+## Install
+
+BumpCheck is published as the `bumpcheck-py` distribution and installs a
+`bumpcheck` command:
+
+```
+uv tool install bumpcheck-py
+```
 
 ## Real-world validation
 

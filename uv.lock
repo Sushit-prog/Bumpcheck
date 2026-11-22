@@ -21,8 +21,8 @@ wheels = [
 ]
 
 [[package]]
-name = "bumpcheck"
-version = "0.1.0"
+name = "bumpcheck-py"
+version = "0.1.1"
 source = { editable = "." }
 dependencies = [
     { name = "griffe" },
