@@ -1,0 +1,33 @@
+{
+  "kept": 60,
+  "excluded": 216,
+  "distinct_repos": 41,
+  "labels": {
+    "BROKE_SUSPECT": 46,
+    "UNCLEAR": 14
+  },
+  "reasons": {
+    "ci_not_attributable": 6,
+    "closed_without_ci_signal": 34,
+    "group_bump": 9,
+    "no_ci": 2,
+    "no_supported_lockfile": 53,
+    "not_single_package": 74,
+    "other": 4,
+    "parse_mismatch": 25,
+    "repo_cap": 9
+  },
+  "bots": {
+    "dependabot": 47,
+    "renovate": 13
+  },
+  "splits": {
+    "dev": 40,
+    "test": 20
+  },
+  "api_calls": 92,
+  "cache_hits": 7,
+  "search_calls": 3,
+  "retried": 0,
+  "recovered": 0
+}
