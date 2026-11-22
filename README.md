@@ -1,6 +1,6 @@
 BumpCheck analyzes whether a dependency bump in a Dependabot or Renovate pull request will break your code.
 
-Status: early development
+Status: early development (v0.1.0)
 
 ## Real-world validation
 
@@ -372,6 +372,26 @@ uv run bumpcheck bench report --dir bench/v0-candidates [--split dev|test|all]
 `--split` defaults to `dev` for both `eval` and `report`; `all` includes both
 splits. The test split is evaluated once at the end; pass `--split test` only
 for that.
+
+### v0.1 validation
+
+The v0.1 rules were frozen after dev labeling at commit `953b0bc`; the held-out
+test split was labeled and evaluated once afterward. This is a small,
+failure-enriched, single-annotator benchmark, so these raw counts are not an
+accuracy estimate for real-world traffic. The test split contained no
+hand-labeled `BROKE` cases, so recall and false-safe rate are not measurable
+there.
+
+| split | BROKE/OK evaluated | false-safe | breakage recall | SAFE precision | UNKNOWN |
+| ----- | ------------------ | ---------- | --------------- | -------------- | ------- |
+| dev | 5/23 | 0/5 | 5/5 | 15/15 | 4/28 |
+| test | 0/21 | n/a | n/a | 13/13 | 3/21 |
+| all | 5/44 | 0/5 | 5/5 | 28/28 | 7/49 |
+
+All five `BROKE` cases are `python_version_support` failures detected from
+`requires_python` metadata. Two dev cases failed snapshot ingestion and are
+reported separately, never counted as `SAFE`; the held-out split had no
+evaluation errors.
 
 ## Credentials
 
