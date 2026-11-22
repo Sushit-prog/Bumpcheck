@@ -253,6 +253,8 @@ class GitHubClient:
         cache_dir: Path | None = None,
         offline: bool = False,
         max_rate_limit_wait_s: float = 900.0,
+        prefer_cache: bool = False,
+        reuse_responses: bool = False,
     ) -> None:
         self.token = token if token is not None else os.environ.get("GITHUB_TOKEN")
         self._transport = transport or urllib_transport
@@ -264,12 +266,29 @@ class GitHubClient:
         self._warn = warn if warn is not None else _stderr_warning
         self.cache_dir = Path(cache_dir) if cache_dir is not None else DEFAULT_CACHE_DIR
         self.offline = offline
+        self.prefer_cache = prefer_cache
         self.max_rate_limit_wait_s = max_rate_limit_wait_s
         self.api_calls = 0
         self.search_calls = 0
         self.cache_hits = 0
         self._last_request_at: float | None = None
         self._pending_reset_at: float | None = None
+        self.reuse_responses = reuse_responses
+        self._responses: dict[str, bytes] = {}
+
+    def _reused_response(self, url: str) -> bytes | None:
+        if not self.reuse_responses:
+            return None
+        body = self._responses.get(url)
+        if body is None:
+            return None
+        self.cache_hits += 1
+        return body
+
+    def _remember_response(self, url: str, body: bytes) -> bytes:
+        if self.reuse_responses:
+            self._responses[url] = body
+        return body
 
     def _base_headers(self, url: str, *, authenticate: bool = True) -> dict[str, str]:
         headers = {
@@ -292,14 +311,19 @@ class GitHubClient:
         return self.get_bytes(url).decode("utf-8-sig")
 
     def get_bytes(self, url: str) -> bytes:
+        reused = self._reused_response(url)
+        if reused is not None:
+            return reused
         entry = self._load_cache(url)
-        if self.offline:
-            if entry is None:
-                raise OfflineCacheMiss(
-                    f"--offline was given but nothing for {url} is cached in {self.cache_dir}"
-                )
+        if entry is not None and (self.offline or self.prefer_cache):
             self.cache_hits += 1
-            return entry["body"]
+            if entry["status"] >= 400:
+                raise HttpStatusError(entry["status"], url, entry["body"], {})
+            return self._remember_response(url, entry["body"])
+        if self.offline:
+            raise OfflineCacheMiss(
+                f"--offline was given but nothing for {url} is cached in {self.cache_dir}"
+            )
 
         headers = self._base_headers(url)
         if entry is not None and entry.get("etag"):
@@ -308,20 +332,27 @@ class GitHubClient:
         if status == 304 and entry is not None:
             self.cache_hits += 1
             self._pause_if_exhausted(response_headers)
-            return entry["body"]
+            if entry["status"] >= 400:
+                raise HttpStatusError(entry["status"], url, entry["body"], {})
+            return self._remember_response(url, entry["body"])
         if status >= 400:
+            if status == 404:
+                self._store_cache(url, None, body, status=status)
             raise HttpStatusError(status, url, body, response_headers)
         if status == 200:
             self._store_cache(url, _header(response_headers, "etag"), body)
         self._pause_if_exhausted(response_headers)
-        return body
+        return self._remember_response(url, body)
 
     def get_external_bytes(self, url: str, *, timeout: float = 10) -> bytes:
         """Fetch a non-GitHub URL through the same cache, without credentials."""
+        reused = self._reused_response(url)
+        if reused is not None:
+            return reused
         entry = self._load_cache(url)
         if entry is not None:
             self.cache_hits += 1
-            return entry["body"]
+            return self._remember_response(url, entry["body"])
         if self.offline:
             raise OfflineCacheMiss(
                 f"--offline was given but nothing for {url} is cached in {self.cache_dir}"
@@ -338,7 +369,7 @@ class GitHubClient:
             path = urllib.parse.urlsplit(url).path
             raise GitHubError(f"Network error for {path}: {type(exc).__name__}: {exc}") from exc
         self._store_cache(url, None, body)
-        return body
+        return self._remember_response(url, body)
 
     def get_external_json(self, url: str, *, timeout: float = 10) -> Any:
         body = self.get_external_bytes(url, timeout=timeout)
@@ -351,10 +382,13 @@ class GitHubClient:
     def get_external_bytes_limited(
         self, url: str, *, timeout: float = 10, max_bytes: int = MAX_DOWNLOAD_BYTES
     ) -> bytes:
+        reused = self._reused_response(url)
+        if reused is not None:
+            return reused
         entry = self._load_cache(url)
         if entry is not None:
             self.cache_hits += 1
-            return entry["body"]
+            return self._remember_response(url, entry["body"])
         if self.offline:
             raise OfflineCacheMiss(
                 f"--offline was given but nothing for {url} is cached in {self.cache_dir}"
@@ -364,7 +398,7 @@ class GitHubClient:
         if status >= 400:
             raise HttpStatusError(status, url, body, response_headers)
         self._store_cache(url, None, body)
-        return body
+        return self._remember_response(url, body)
 
     def _send_stream(
         self, url: str, headers: Mapping[str, str], max_bytes: int
@@ -624,13 +658,17 @@ class GitHubClient:
             decoded = base64.b64decode(body.encode("ascii"))
         except (ValueError, UnicodeEncodeError):
             return None
-        return {"url": url, "etag": payload.get("etag"), "body": decoded}
+        status = payload.get("status", 200)
+        if not isinstance(status, int):
+            return None
+        return {"url": url, "etag": payload.get("etag"), "status": status, "body": decoded}
 
-    def _store_cache(self, url: str, etag: str | None, body: bytes) -> None:
+    def _store_cache(self, url: str, etag: str | None, body: bytes, *, status: int = 200) -> None:
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         payload = {
             "url": url,
             "etag": etag,
+            "status": status,
             "body": base64.b64encode(body).decode("ascii"),
         }
         self._cache_file(url).write_text(

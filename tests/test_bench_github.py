@@ -65,6 +65,54 @@ def _json(payload: object) -> tuple[int, dict, bytes]:
     return 200, {"Content-Type": "application/json"}, json.dumps(payload).encode("utf-8")
 
 
+def test_response_reuse_avoids_second_request(tmp_path: Path) -> None:
+    url = "https://api.github.com/repos/o/r"
+    recorder = Recorder({url: _json({"ok": True})})
+    sleeps: list[float] = []
+    client = _client(recorder, tmp_path, reuse_responses=True, sleeps=sleeps)
+
+    assert client.get_json(url) == {"ok": True}
+    assert client.get_json(url) == {"ok": True}
+    assert len(recorder.calls) == 1
+    assert client.api_calls == 1
+    assert client.cache_hits == 1
+    assert sleeps == []
+
+
+def test_prefer_cache_skips_etag_revalidation(tmp_path: Path) -> None:
+    url = "https://api.github.com/repos/o/r"
+    cache_dir = tmp_path / "cache"
+    seed_recorder = Recorder({url: (200, {"ETag": "v1"}, b"body")})
+    seed = _client(seed_recorder, tmp_path, cache_dir=cache_dir)
+    assert seed.get_bytes(url) == b"body"
+
+    recorder = Recorder({})
+    client = _client(recorder, tmp_path, cache_dir=cache_dir, prefer_cache=True)
+
+    assert client.get_bytes(url) == b"body"
+    assert recorder.calls == []
+    assert client.api_calls == 0
+    assert client.cache_hits == 1
+
+
+def test_cached_404_replayed_without_request(tmp_path: Path) -> None:
+    url = "https://raw.githubusercontent.com/o/r/sha/missing.toml"
+    cache_dir = tmp_path / "cache"
+    seed_recorder = Recorder({url: (404, {}, b"not found")})
+    seed = _client(seed_recorder, tmp_path, cache_dir=cache_dir)
+    with pytest.raises(HttpStatusError) as seeded:
+        seed.get_bytes(url)
+    assert seeded.value.status == 404
+
+    recorder = Recorder({})
+    client = _client(recorder, tmp_path, cache_dir=cache_dir, prefer_cache=True)
+    with pytest.raises(HttpStatusError) as replayed:
+        client.get_bytes(url)
+
+    assert replayed.value.status == 404
+    assert recorder.calls == []
+
+
 def test_token_is_sent_but_never_written_to_cache(tmp_path: Path) -> None:
     url = "https://api.github.com/repos/o/r"
     recorder = Recorder({url: _json({"ok": True})})

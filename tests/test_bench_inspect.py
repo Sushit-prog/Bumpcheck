@@ -582,6 +582,31 @@ def test_inspect_batch_reuses_sections_and_caches_pypi(tmp_path: Path) -> None:
     assert calls[_pypi_url("1.0.0", "unrelated")] == 1
 
 
+def test_inspect_batch_enables_response_reuse(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import bumpcheck.bench.inspect_case as inspect_module
+
+    directory = _setup(tmp_path, _candidate())
+    json_responses, bytes_responses = _responses()
+    captured: dict[str, object] = {}
+
+    def client_factory(**kwargs: object) -> FakeGitHub:
+        captured.update(kwargs)
+        return FakeGitHub(json_responses, bytes_responses)
+
+    monkeypatch.setattr(inspect_module, "GitHubClient", client_factory)
+    out = tmp_path / "report.txt"
+    pypi = _default_pypi()
+    pypi[_pypi_url("1.0.0", "unrelated")] = _pypi_bytes_for("unrelated", "1.0.0", ">=3.10")
+
+    run_inspect_batch(directory, out=out, pypi_fetch=_pypi_fetch(pypi))
+
+    assert captured["prefer_cache"] is True
+    assert captured["reuse_responses"] is True
+    assert out.exists()
+
+
 def test_cli_inspect_missing_case_exits_two(tmp_path: Path) -> None:
     directory = _setup(tmp_path, _candidate())
     result = CliRunner().invoke(

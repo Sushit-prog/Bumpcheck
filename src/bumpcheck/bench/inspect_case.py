@@ -1128,6 +1128,8 @@ def run_inspect_batch(
         cache_dir=cache_dir,
         offline=offline,
         max_rate_limit_wait_s=max_rate_limit_wait_s,
+        prefer_cache=True,
+        reuse_responses=True,
     )
     cache: PypiCache = {}
     output: list[str] = []
