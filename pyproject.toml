@@ -37,6 +37,7 @@ target-version = "py311"
 src = ["src", "tests"]
 extend-exclude = [
     "tests/fixtures/usage_repo",
+    "tests/fixtures/offline_regressions/**/repo",
     "bench/v0-candidates",
     "bench/v0-failures",
     "bench/**/snapshots",

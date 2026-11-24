@@ -29,6 +29,39 @@ def make_tar(entries: dict[str, bytes], *, root: str | None = None) -> bytes:
     return buffer.getvalue()
 
 
+def make_link_tar(
+    files: dict[str, bytes],
+    links: dict[str, tuple[str, str]],
+    *,
+    root: str | None = None,
+    directories: tuple[str, ...] = (),
+) -> bytes:
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as handle:
+        for directory in directories:
+            path = f"{root}/{directory}" if root else directory
+            info = tarfile.TarInfo(path.rstrip("/") + "/")
+            info.type = tarfile.DIRTYPE
+            handle.addfile(info)
+        for name, data in files.items():
+            path = f"{root}/{name}" if root else name
+            info = tarfile.TarInfo(path)
+            info.size = len(data)
+            handle.addfile(info, io.BytesIO(data))
+        for name, (kind, target) in links.items():
+            path = f"{root}/{name}" if root else name
+            info = tarfile.TarInfo(path)
+            if kind == "sym":
+                info.type = tarfile.SYMTYPE
+            elif kind == "hard":
+                info.type = tarfile.LNKTYPE
+            else:
+                raise ValueError(kind)
+            info.linkname = target
+            handle.addfile(info)
+    return buffer.getvalue()
+
+
 def test_zip_extracts_only_wheel_sources(tmp_path: Path) -> None:
     data = make_wheel(
         {
@@ -127,6 +160,131 @@ def test_tar_rejects_symlinks(tmp_path: Path) -> None:
         )
 
     assert excinfo.value.kind == "unsafe_archive"
+
+
+def test_tar_symlink_to_python_inside_repo_is_followed(tmp_path: Path) -> None:
+    data = make_link_tar(
+        {"inventory.py": b"value = 1\n"},
+        {"tests/inventory_launch.py": ("sym", "../inventory.py")},
+        root="repo-sha",
+    )
+
+    stats = archive.extract_tar(
+        data,
+        tmp_path / "repo",
+        selector=archive.select_repo_member,
+        cap_bytes=1024 * 1024,
+        strip_root=True,
+    )
+
+    assert (tmp_path / "repo" / "inventory.py").is_file()
+    assert (tmp_path / "repo" / "tests" / "inventory_launch.py").read_text() == "value = 1\n"
+    assert stats.files_extracted == 2
+    assert stats.has_skipped_python is False
+
+
+def test_tar_hardlink_to_python_inside_repo_is_followed(tmp_path: Path) -> None:
+    data = make_link_tar(
+        {"inventory.py": b"value = 1\n"},
+        {"tests/inventory_launch.py": ("hard", "inventory.py")},
+        root="repo-sha",
+    )
+
+    stats = archive.extract_tar(
+        data,
+        tmp_path / "repo",
+        selector=archive.select_repo_member,
+        cap_bytes=1024 * 1024,
+        strip_root=True,
+    )
+
+    assert (tmp_path / "repo" / "inventory.py").is_file()
+    assert (tmp_path / "repo" / "tests" / "inventory_launch.py").read_text() == "value = 1\n"
+    assert stats.files_extracted == 2
+    assert stats.has_skipped_python is False
+
+
+def test_tar_symlink_chain_is_followed(tmp_path: Path) -> None:
+    data = make_link_tar(
+        {"c.py": b"value = 3\n"},
+        {"a.py": ("sym", "b.py"), "b.py": ("sym", "c.py")},
+        root="repo-sha",
+    )
+
+    stats = archive.extract_tar(
+        data,
+        tmp_path / "repo",
+        selector=archive.select_repo_member,
+        cap_bytes=1024 * 1024,
+        strip_root=True,
+    )
+
+    assert (tmp_path / "repo" / "a.py").read_text() == "value = 3\n"
+    assert (tmp_path / "repo" / "b.py").read_text() == "value = 3\n"
+    assert stats.files_extracted == 3
+    assert stats.has_skipped_python is False
+
+
+def test_tar_symlink_to_directory_is_rejected(tmp_path: Path) -> None:
+    data = make_link_tar(
+        {"main.py": b"value = 1\n"},
+        {"link.py": ("sym", "pkg")},
+        root="repo-sha",
+        directories=("pkg",),
+    )
+
+    with pytest.raises(archive.ArchiveError) as excinfo:
+        archive.extract_tar(
+            data,
+            tmp_path / "repo",
+            selector=archive.select_repo_member,
+            cap_bytes=1024,
+            strip_root=True,
+        )
+
+    assert excinfo.value.kind == "unsafe_archive"
+    assert not (tmp_path / "repo").exists()
+
+
+def test_tar_absolute_path_symlink_is_rejected(tmp_path: Path) -> None:
+    data = make_link_tar({}, {"evil.py": ("sym", "/etc/passwd")}, root="repo-sha")
+
+    with pytest.raises(archive.ArchiveError) as excinfo:
+        archive.extract_tar(
+            data,
+            tmp_path / "repo",
+            selector=archive.select_repo_member,
+            cap_bytes=1024,
+            strip_root=True,
+        )
+
+    assert excinfo.value.kind == "unsafe_archive"
+    assert not (tmp_path / "repo").exists()
+
+
+def test_tar_non_python_symlink_is_ignored_by_repo_selector(tmp_path: Path) -> None:
+    data = make_link_tar(
+        {"secret.py": b"value = 1\n"},
+        {"README.md": ("sym", "secret.py")},
+        root="repo-sha",
+    )
+
+    stats = archive.extract_tar(
+        data,
+        tmp_path / "repo",
+        selector=archive.select_repo_member,
+        cap_bytes=1024 * 1024,
+        strip_root=True,
+    )
+
+    extracted = {
+        path.relative_to(tmp_path / "repo").as_posix()
+        for path in (tmp_path / "repo").rglob("*")
+        if path.is_file()
+    }
+    assert extracted == {"secret.py"}
+    assert stats.files_extracted == 1
+    assert stats.has_skipped_python is False
 
 
 def test_selective_wheel_extraction_keeps_top_level_from_sources(tmp_path: Path) -> None:

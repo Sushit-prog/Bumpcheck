@@ -34,6 +34,7 @@ _REPO_NAMES = frozenset(
 )
 _WINDOWS_RESERVED = re.compile(r"^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\..*)?$", re.IGNORECASE)
 _WINDOWS_INVALID = frozenset({"<", ">", ":", '"', "?", "*", "|"})
+_MAX_LINK_DEPTH = 8
 
 
 class ArchiveError(Exception):
@@ -140,6 +141,93 @@ def _case_key(name: str) -> str:
     return PurePosixPath(name).as_posix().lower()
 
 
+def _hidden_path(name: str) -> bool:
+    return any(
+        part.startswith(".") and part not in {".github"} for part in PurePosixPath(name).parts[:-1]
+    )
+
+
+def _tar_root(members: list[tarfile.TarInfo]) -> str | None:
+    names = [PurePosixPath(member.name).as_posix() for member in members]
+    roots = {name.split("/", 1)[0] for name in names if name and not name.startswith("/")}
+    if len(roots) != 1:
+        return None
+    return next(iter(roots))
+
+
+def _normalize_archive_path(base: PurePosixPath, target: str) -> str | None:
+    if not target or target.startswith("/") or "\\" in target:
+        return None
+    path = base / target if base != PurePosixPath(".") else PurePosixPath(target)
+    parts: list[str] = []
+    for part in path.parts:
+        if part in {"", "."}:
+            continue
+        if part == "..":
+            if not parts:
+                return None
+            parts.pop()
+        else:
+            parts.append(part)
+    if not parts:
+        return None
+    normalized = PurePosixPath(*parts).as_posix()
+    if _unsafe_reason(normalized) is not None or _windows_skip_reason(normalized) is not None:
+        return None
+    return normalized
+
+
+def _tar_one_hop_target(
+    name: str,
+    member: tarfile.TarInfo,
+    root: str | None,
+) -> str | None:
+    linkname = member.linkname
+    if member.issym():
+        return _normalize_archive_path(PurePosixPath(name).parent, linkname)
+    candidates: list[str] = []
+    direct = _normalize_archive_path(PurePosixPath("."), linkname)
+    if direct is not None:
+        candidates.append(direct)
+    if root and linkname.startswith(f"{root}/"):
+        stripped = _normalize_archive_path(PurePosixPath("."), linkname[len(root) + 1 :])
+        if stripped is not None:
+            candidates.append(stripped)
+    unique = list(dict.fromkeys(candidates))
+    if len(unique) != 1:
+        return None
+    return unique[0]
+
+
+def _resolve_tar_source(
+    name: str,
+    member: tarfile.TarInfo,
+    by_name: dict[str, tarfile.TarInfo],
+    candidate_names: set[str],
+    case_map: dict[str, set[str]],
+    root: str | None,
+) -> str | None:
+    current = _tar_one_hop_target(name, member, root)
+    visited = {name}
+    for _ in range(_MAX_LINK_DEPTH):
+        if current is None or current in visited:
+            return None
+        visited.add(current)
+        target = by_name.get(current)
+        if target is None:
+            return None
+        if target.isfile():
+            if current not in candidate_names:
+                return None
+            if _hidden_path(current) or len(case_map.get(_case_key(current), set())) != 1:
+                return None
+            return current
+        if not (target.issym() or target.islnk()):
+            return None
+        current = _tar_one_hop_target(current, target, root)
+    return None
+
+
 def _prepare_path(
     name: str, root: Path, seen: dict[str, str], stats: ExtractionStats, size: int
 ) -> Path | None:
@@ -156,10 +244,10 @@ def _prepare_path(
         stats.add_skipped(name, size, "case_collision")
         return None
     seen[key] = name
-    parts = PurePosixPath(name).parts
-    if any(part.startswith(".") and part not in {".github"} for part in parts[:-1]):
+    if _hidden_path(name):
         stats.add_skipped(name, size, "hidden_path")
         return None
+    parts = PurePosixPath(name).parts
     return root.joinpath(*parts)
 
 
@@ -275,20 +363,42 @@ def extract_tar(
                 if strip_root
                 else [(PurePosixPath(member.name).as_posix(), member) for member in members]
             )
+            names = [name for name, _ in selected if name]
+            by_name = {name: member for name, member in selected if name}
             candidates = [(name, member) for name, member in selected if name and selector(name)]
+            candidate_names = {name for name, _ in candidates}
+            case_map: dict[str, set[str]] = {}
+            for name in by_name:
+                case_map.setdefault(_case_key(name), set()).add(name)
+            root = _tar_root(members) if strip_root else None
+            links: dict[str, str] = {}
+            for name, member in candidates:
+                if member.isfile():
+                    continue
+                if not (member.issym() or member.islnk()):
+                    raise ArchiveError("unsafe_archive", f"Unsafe member: {name}")
+                if len(names) != len(by_name):
+                    raise ArchiveError("unsafe_archive", f"Ambiguous member: {name}")
+                source_name = _resolve_tar_source(
+                    name, member, by_name, candidate_names, case_map, root
+                )
+                if source_name is None:
+                    raise ArchiveError("unsafe_archive", f"Unsafe member: {name}")
+                links[name] = source_name
             declared = sum(member.size for _, member in candidates if member.isfile())
+            declared += sum(by_name[name].size for name in links.values())
             if declared > cap_bytes:
                 raise ArchiveError("too_large", f"Archive declares {declared} extracted bytes")
             seen: dict[str, str] = {}
             for name, member in candidates:
-                if not member.isfile():
-                    raise ArchiveError("unsafe_archive", f"Unsafe member: {name}")
-                destination = _prepare_path(name, temp_dir, seen, stats, member.size)
+                source_name = name if member.isfile() else links[name]
+                source_member = by_name[source_name]
+                destination = _prepare_path(name, temp_dir, seen, stats, source_member.size)
                 if destination is None:
                     continue
-                source = archive.extractfile(member)
+                source = archive.extractfile(source_member)
                 if source is None:
-                    raise ArchiveError("unpack_failed", f"Could not read member: {name}")
+                    raise ArchiveError("unpack_failed", f"Could not read member: {source_name}")
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 written = 0
                 with source, destination.open("wb") as handle:

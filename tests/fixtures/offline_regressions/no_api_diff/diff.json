@@ -1,0 +1,18 @@
+{
+  "package": "pkg",
+  "old_version": "1.0.0",
+  "new_version": "2.0.0",
+  "status": "no_api_diff",
+  "reason": "no_wheel",
+  "api_definition": "griffe-default",
+  "changes": [],
+  "top_level": [],
+  "compared": [],
+  "old_wheel": null,
+  "new_wheel": null,
+  "warnings": [],
+  "old_requires_python": null,
+  "new_requires_python": null,
+  "old_requires_python_state": "available",
+  "new_requires_python_state": "available"
+}

@@ -51,6 +51,20 @@ def tar_bytes(names: dict[str, str]) -> bytes:
     return buffer.getvalue()
 
 
+def tar_bytes_with_python_symlink() -> bytes:
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as handle:
+        target = b"value = 1\n"
+        target_info = tarfile.TarInfo("repo-sha/inventory.py")
+        target_info.size = len(target)
+        handle.addfile(target_info, io.BytesIO(target))
+        link = tarfile.TarInfo("repo-sha/tests/inventory_launch.py")
+        link.type = tarfile.SYMTYPE
+        link.linkname = "../inventory.py"
+        handle.addfile(link)
+    return buffer.getvalue()
+
+
 def candidate() -> dict[str, Any]:
     return {
         "case_id": "owner/repo#1",
@@ -68,7 +82,11 @@ def candidate() -> dict[str, Any]:
     }
 
 
-def fake_client(wheel: bytes | None = None, repo_names: dict[str, str] | None = None) -> FakeClient:
+def fake_client(
+    wheel: bytes | None = None,
+    repo_names: dict[str, str] | None = None,
+    repo_tar: bytes | None = None,
+) -> FakeClient:
     wheel = wheel or wheel_bytes()
     repo_names = repo_names or {"main.py": "value = 1\n", "pyproject.toml": "[project]\n"}
     payload = {
@@ -92,7 +110,8 @@ def fake_client(wheel: bytes | None = None, repo_names: dict[str, str] | None = 
         "https://raw.githubusercontent.com/owner/repo/base/requirements.txt": "pkg==1.0.0\n",
         "https://raw.githubusercontent.com/owner/repo/head/requirements.txt": "pkg==2.0.0\n",
     }
-    return FakeClient(external, {repo_url: tar_bytes(repo_names)}, texts)
+    payload_repo = repo_tar if repo_tar is not None else tar_bytes(repo_names or {})
+    return FakeClient(external, {repo_url: payload_repo}, texts)
 
 
 def test_snapshot_complete_and_resumable(tmp_path: Path) -> None:
@@ -114,6 +133,20 @@ def test_snapshot_complete_and_resumable(tmp_path: Path) -> None:
     client.downloads.clear()
     again = snapshot.snapshot_case(item, root, github_client=client)
     assert again == manifest
+
+
+def test_snapshot_complete_when_repo_has_python_symlink(tmp_path: Path) -> None:
+    client = fake_client(repo_tar=tar_bytes_with_python_symlink())
+    root = tmp_path / "snapshots"
+    item = candidate()
+
+    manifest = snapshot.snapshot_case(item, root, github_client=client)
+    case_dir = snapshot.snapshot_path(root, item)
+
+    assert manifest["status"] == "complete"
+    assert (case_dir / "repo" / "tests" / "inventory_launch.py").is_file()
+    assert (case_dir / "repo" / "tests" / "inventory_launch.py").read_text() == "value = 1\n"
+    assert manifest["skipped"]["files"] == 0
 
 
 def test_snapshot_no_wheel_is_terminal(tmp_path: Path) -> None:
