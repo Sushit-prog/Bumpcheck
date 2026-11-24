@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import re
 import tomllib
+from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 
+from packaging.requirements import InvalidRequirement, Requirement
 from packaging.utils import canonicalize_name
 from packaging.version import InvalidVersion, Version
 
-from bumpcheck.models import Bump, ParseResult, Unresolved
+from bumpcheck.models import Bump, DependencyPin, ParseResult, Unresolved
 
 SUPPORTED_KINDS = ("uv.lock", "poetry.lock", "requirements")
 
@@ -23,6 +26,10 @@ _REQUIREMENT_RE = re.compile(
 )
 _HASH_RE = re.compile(r"(?:^|\s)--hash=\S+")
 _URL_REQUIREMENT_RE = re.compile(r"\s@\s|^[^=\s]+@")
+_PACKAGE_TABLE_RE = re.compile(r"^\s*\[\[package\]\]\s*(?:#.*)?$")
+_TABLE_RE = re.compile(r"^\s*\[")
+_TOML_NAME_RE = re.compile(r"^\s*name\s*=\s*(?P<quote>[\"'])(?P<value>.*?)(?P=quote)")
+_TOML_VERSION_RE = re.compile(r"^\s*version\s*=\s*(?P<quote>[\"'])(?P<value>.*?)(?P=quote)")
 
 
 class LockParseError(Exception):
@@ -120,20 +127,27 @@ def _extract_toml(text: str, kind: str) -> _Extracted:
 
 
 def _logical_lines(text: str) -> list[str]:
-    lines: list[str] = []
+    return [line for _, line in _logical_lines_with_positions(text)]
+
+
+def _logical_lines_with_positions(text: str) -> list[tuple[int, str]]:
+    lines: list[tuple[int, str]] = []
     buffer = ""
-    for raw_line in text.splitlines():
+    start = 1
+    for number, raw_line in enumerate(text.splitlines(), start=1):
         line = raw_line.strip()
         if not line and not buffer:
             continue
+        if not buffer:
+            start = number
         buffer = f"{buffer} {line}".strip() if buffer else line
         if buffer.endswith("\\"):
             buffer = buffer[:-1].rstrip()
             continue
-        lines.append(buffer)
+        lines.append((start, buffer))
         buffer = ""
     if buffer:
-        lines.append(buffer)
+        lines.append((start, buffer))
     return lines
 
 
@@ -174,10 +188,113 @@ def _extract_requirements(text: str, kind: str) -> _Extracted:
     return _Extracted(versions=versions, ignored=ignored, warnings=warnings)
 
 
+def _clean_requirement_line(logical_line: str) -> str | None:
+    line = logical_line.split("#", 1)[0].strip()
+    line = _HASH_RE.sub("", line).strip()
+    if not line or line.startswith("-") or _URL_REQUIREMENT_RE.search(line):
+        return None
+    return line
+
+
+def _pin_from_requirement(
+    line: str,
+    kind: str,
+    *,
+    file: str | None,
+    line_number: int,
+) -> DependencyPin | None:
+    try:
+        requirement = Requirement(line)
+    except InvalidRequirement:
+        return None
+    specifiers = list(requirement.specifier)
+    version: str | None = None
+    if len(specifiers) == 1:
+        specifier = specifiers[0]
+        if specifier.operator == "==" and not specifier.version.endswith(".*"):
+            version = specifier.version
+    return DependencyPin(
+        package=requirement.name,
+        version=version,
+        source=kind,
+        specifier=str(requirement.specifier) if requirement.specifier else None,
+        raw=line,
+        extras=tuple(requirement.extras),
+        marker=str(requirement.marker) if requirement.marker is not None else None,
+        file=file,
+        line=line_number,
+    )
+
+
+def _pins_from_requirements(text: str, kind: str, file: str | None) -> list[DependencyPin]:
+    pins: list[DependencyPin] = []
+    for line_number, logical_line in _logical_lines_with_positions(text):
+        line = _clean_requirement_line(logical_line)
+        if line is None:
+            continue
+        pin = _pin_from_requirement(line, kind, file=file, line_number=line_number)
+        if pin is not None:
+            pins.append(pin)
+    return pins
+
+
+def _pins_from_toml(text: str, kind: str, file: str | None) -> list[DependencyPin]:
+    lines = text.splitlines()
+    starts = [index for index, line in enumerate(lines) if _PACKAGE_TABLE_RE.match(line)]
+    pins: list[DependencyPin] = []
+    for position, start in enumerate(starts):
+        end = starts[position + 1] if position + 1 < len(starts) else len(lines)
+        name: str | None = None
+        version: str | None = None
+        version_line: int | None = None
+        for offset in range(start + 1, end):
+            line = lines[offset]
+            if name is None and (match := _TOML_NAME_RE.match(line)) is not None:
+                name = match.group("value")
+            if version is None and (match := _TOML_VERSION_RE.match(line)) is not None:
+                version = match.group("value")
+                version_line = offset + 1
+        if name is None or version is None or version_line is None:
+            continue
+        try:
+            pins.append(
+                DependencyPin(
+                    package=name,
+                    version=version,
+                    source=kind,
+                    specifier=f"=={version}",
+                    raw=f"{name}=={version}",
+                    file=file,
+                    line=version_line,
+                )
+            )
+        except ValueError:
+            continue
+    return pins
+
+
+def extract_dependency_pins(
+    text: str,
+    kind: str,
+    *,
+    file: str | None = None,
+) -> tuple[DependencyPin, ...]:
+    """Extract pinned dependencies with source locations for dependency-constraint checks."""
+    extractor = _TOML_PIN_EXTRACTORS.get(kind)
+    if extractor is None:
+        extractor = _pins_from_requirements
+    return tuple(extractor(_normalize_text(text), kind, file))
+
+
 _EXTRACTORS = {
     "uv.lock": _extract_toml,
     "poetry.lock": _extract_toml,
     "requirements": _extract_requirements,
+}
+_TomlPinExtractor = Callable[[str, str, str | None], list[DependencyPin]]
+_TOML_PIN_EXTRACTORS: dict[str, _TomlPinExtractor] = {
+    "uv.lock": _pins_from_toml,
+    "poetry.lock": _pins_from_toml,
 }
 
 
@@ -190,7 +307,13 @@ def extract_pinned_versions(text: str, kind: str) -> dict[str, list[str]]:
     return dict(extractor(_normalize_text(text), kind).versions)
 
 
-def parse_lock_pair(old_text: str, new_text: str, kind: str) -> ParseResult:
+def parse_lock_pair(
+    old_text: str,
+    new_text: str,
+    kind: str,
+    *,
+    new_lock_path: Path | str | None = None,
+) -> ParseResult:
     """Compare two lockfile contents and return the changed packages."""
     extractor = _EXTRACTORS.get(kind)
     if extractor is None:
@@ -241,4 +364,6 @@ def parse_lock_pair(old_text: str, new_text: str, kind: str) -> ParseResult:
         for item in unresolved
     ]
     warnings = list(dict.fromkeys(old.warnings + new.warnings + unresolved_warnings))
-    return ParseResult(bumps=bumps, warnings=warnings, unresolved=unresolved)
+    pin_file = str(new_lock_path) if new_lock_path is not None else None
+    pins = extract_dependency_pins(new_text, kind, file=pin_file)
+    return ParseResult(bumps=bumps, warnings=warnings, unresolved=unresolved, new_pins=pins)

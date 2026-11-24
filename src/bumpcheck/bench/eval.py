@@ -19,7 +19,16 @@ from bumpcheck.bench.labels import Label, load_candidates, load_labels
 
 Split = str
 Runner = Callable[[dict[str, Any], float], dict[str, Any]]
-RESULTS_SCHEMA_VERSION = 3
+RESULTS_SCHEMA_VERSION = 4
+
+_BREAK_CATEGORY_RULES: dict[str, frozenset[str]] = {
+    "api_break": frozenset({"R4", "R5"}),
+    "python_version_support": frozenset({"R8"}),
+    "dependency_conflict": frozenset({"R10"}),
+    "behavioral": frozenset({"R4", "R5", "R10"}),
+    "other": frozenset(),
+}
+_SAFE_RULES = frozenset({"R2", "R7"})
 
 
 def _project_root() -> Path:
@@ -222,6 +231,41 @@ def _empty_diagnostics(package: str | None = None) -> dict[str, Any]:
     }
 
 
+def correctness_flags(record: Mapping[str, Any]) -> tuple[bool | None, bool | None]:
+    """Return stored verdict/reason correctness flags, deriving them for older records."""
+    flags: dict[str, Any] = {}
+    stored = record.get("correctness")
+    if isinstance(stored, dict):
+        flags.update(stored)
+    for key in ("verdict_correct", "reason_correct"):
+        value = record.get(key)
+        if isinstance(value, bool):
+            flags[key] = value
+    if all(isinstance(flags.get(key), bool) for key in ("verdict_correct", "reason_correct")):
+        return flags["verdict_correct"], flags["reason_correct"]
+
+    label = record.get("label")
+    if label not in {"BROKE", "OK"}:
+        return None, None
+    verdicts = record.get("verdicts")
+    verdict = verdicts.get("bumpcheck") if isinstance(verdicts, dict) else None
+    fired = record.get("fired_rule_ids")
+    rules = set(fired.get("bumpcheck", ())) if isinstance(fired, dict) else set()
+    if label == "BROKE":
+        verdict_correct = verdict in {"REVIEW", "LIKELY_BREAKING"}
+        expected = _BREAK_CATEGORY_RULES.get(str(record.get("break_category") or ""), frozenset())
+        reason_correct = verdict_correct and bool(rules & expected)
+    else:
+        verdict_correct = verdict == "SAFE"
+        reason_correct = verdict_correct and bool(rules & _SAFE_RULES)
+    return verdict_correct, reason_correct
+
+
+def _correctness_record(record: Mapping[str, Any]) -> dict[str, Any]:
+    verdict_correct, reason_correct = correctness_flags(record)
+    return {"verdict_correct": verdict_correct, "reason_correct": reason_correct}
+
+
 def _unknown_result(error_kind: str, package: str | None = None) -> dict[str, Any]:
     return {
         "verdicts": {
@@ -306,6 +350,7 @@ def evaluate(
         if truth.get("disputed"):
             record.update(_unknown_result("disputed_label", package))
             record["rounds"] = truth["rounds"]
+            record.update(_correctness_record(record))
             return record
         payload = {
             "case_id": case_id,
@@ -327,6 +372,7 @@ def evaluate(
         output.setdefault("snapshot_status", None)
         output.setdefault("diagnostics", _empty_diagnostics(package))
         record.update(output)
+        record.update(_correctness_record(record))
         return record
 
     def store(record: dict[str, Any]) -> None:

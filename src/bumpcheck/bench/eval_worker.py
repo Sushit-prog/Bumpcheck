@@ -346,6 +346,7 @@ def run_case(payload: dict[str, Any]) -> dict[str, Any]:
                 diff_fn=diff_fn,
                 usage_fn=usage_fn,
                 cache_dir=Path(temp),
+                new_lock_path=root / chosen,
                 on_bump=on_bump,
             )
         if not check_result.bumps:

@@ -9,7 +9,7 @@ from bumpcheck.apidiff import ApiDiffResult, diff_versions
 from bumpcheck.lockdiff import parse_lock_pair
 from bumpcheck.models import Bump, Unresolved
 from bumpcheck.projectpython import ProjectPythonSet, resolve_project_python
-from bumpcheck.rules import PythonSupportContext, decide
+from bumpcheck.rules import DependencyConflictContext, PythonSupportContext, decide
 from bumpcheck.usage import UsageResult, trace_usage
 from bumpcheck.verdict import (
     PIPELINE_VERSION,
@@ -86,10 +86,11 @@ def check(
     usage_fn: UsageFn = trace_usage,
     project_python_fn: ProjectPythonFn = resolve_project_python,
     cache_dir: Path | None = None,
+    new_lock_path: Path | None = None,
     on_bump: BumpDiagnosticHook | None = None,
 ) -> CheckResult:
     """Check every bump between two lockfiles and classify the breakage risk."""
-    parsed = parse_lock_pair(old_text, new_text, kind)
+    parsed = parse_lock_pair(old_text, new_text, kind, new_lock_path=new_lock_path)
     warnings: list[str] = list(parsed.warnings)
     try:
         project_python = project_python_fn(repo_path)
@@ -153,7 +154,21 @@ def check(
                 state=state,
                 project=project_python,
             )
-            verdict = decide(bump, api, usage, python_support)
+            dependency_context = DependencyConflictContext(
+                new_requires_dist=tuple(api.new_requires_dist),
+                pins=parsed.new_pins,
+                project=project_python,
+            )
+            rule_warnings: list[str] = []
+            verdict = decide(
+                bump,
+                api,
+                usage,
+                python_support,
+                dependency_context,
+                warnings=rule_warnings,
+            )
+            warnings.extend(rule_warnings)
             verdicts.append(verdict)
             emit(verdict, api, usage)
         except Exception as exc:

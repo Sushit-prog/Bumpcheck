@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from bumpcheck.lockdiff import LockParseError, parse_lock_pair
+from bumpcheck.lockdiff import LockParseError, extract_dependency_pins, parse_lock_pair
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -267,6 +267,47 @@ def test_utf8_bom_is_stripped() -> None:
     old, new = fixture_pair("uv_lock", "single_bump")
     result = parse_lock_pair(f"\ufeff{old}", f"\ufeff{new}", "uv.lock")
     assert bump_tuples(result) == [("packaging", "24.0", "25.0")]
+
+
+def test_extract_dependency_pins_from_requirements_keeps_provenance() -> None:
+    text = (
+        "Flask==3.1.3\n"
+        "werkzeug==2.0.3  # pinned\n"
+        'Jinja2>=3.1.2; python_version >= "3.9"\n'
+        "requests[socks]==2.32.0\n"
+    )
+    pins = extract_dependency_pins(text, "requirements", file="requirements.txt")
+
+    by_package = {pin.package: pin for pin in pins}
+    assert by_package["werkzeug"].version == "2.0.3"
+    assert by_package["werkzeug"].file == "requirements.txt"
+    assert by_package["werkzeug"].line == 2
+    assert by_package["werkzeug"].raw == "werkzeug==2.0.3"
+    assert by_package["jinja2"].version is None
+    assert by_package["jinja2"].specifier == ">=3.1.2"
+    assert by_package["jinja2"].marker == 'python_version >= "3.9"'
+    assert by_package["requests"].extras == ("socks",)
+
+
+def test_extract_dependency_pins_from_uv_lock_keeps_version_line() -> None:
+    text = (
+        "version = 1\n"
+        "\n"
+        "[[package]]\n"
+        'name = "flask"\n'
+        'version = "3.1.3"\n'
+        "\n"
+        "[[package]]\n"
+        'name = "werkzeug"\n'
+        'version = "2.0.3"\n'
+    )
+    pins = extract_dependency_pins(text, "uv.lock", file="uv.lock")
+
+    werkzeug = next(pin for pin in pins if pin.package == "werkzeug")
+    assert werkzeug.version == "2.0.3"
+    assert werkzeug.specifier == "==2.0.3"
+    assert werkzeug.file == "uv.lock"
+    assert werkzeug.line == 9
 
 
 def iter_fixture_pairs() -> list:

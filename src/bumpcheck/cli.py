@@ -315,7 +315,14 @@ def check(
     try:
         old_text = old.read_text(encoding="utf-8-sig")
         new_text = new.read_text(encoding="utf-8-sig")
-        result = run_check(repo_path, old_text, new_text, kind.value, cache_dir=cache_dir)
+        result = run_check(
+            repo_path,
+            old_text,
+            new_text,
+            kind.value,
+            cache_dir=cache_dir,
+            new_lock_path=new,
+        )
     except (OSError, LockParseError) as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=2) from exc

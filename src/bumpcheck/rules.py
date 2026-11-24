@@ -5,8 +5,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from packaging.markers import Marker
+from packaging.requirements import InvalidRequirement, Requirement
+from packaging.utils import canonicalize_name
+from packaging.version import InvalidVersion, Version
+
 from bumpcheck.apidiff import ApiChange, ApiDiffResult
-from bumpcheck.models import Bump
+from bumpcheck.models import Bump, DependencyPin
 from bumpcheck.projectpython import ProjectPythonSet
 from bumpcheck.pycompat import MetadataState, assess_requires_python_change
 from bumpcheck.usage import MatchKind, UsageHit, UsageResult, match_hit_to_change
@@ -31,6 +36,13 @@ class PythonSupportContext:
     old_requires_python: str | None
     new_requires_python: str | None
     state: MetadataState
+    project: ProjectPythonSet
+
+
+@dataclass(frozen=True)
+class DependencyConflictContext:
+    new_requires_dist: tuple[str, ...]
+    pins: tuple[DependencyPin, ...]
     project: ProjectPythonSet
 
 
@@ -257,16 +269,149 @@ def _merge_verdicts(base: BumpVerdict, extra: BumpVerdict) -> BumpVerdict:
     )
 
 
+def _warn(warnings: list[str] | None, message: str) -> None:
+    if warnings is not None:
+        warnings.append(message)
+
+
+def _marker_applies(marker: Marker | None, project: ProjectPythonSet) -> bool | None:
+    if marker is None:
+        return True
+    if project.status == "unknown" or not project.versions:
+        return None
+    for version_text in project.versions:
+        try:
+            version = Version(version_text)
+        except InvalidVersion:
+            return None
+        release = version.release
+        python_version = ".".join(str(part) for part in release[:2])
+        python_full_version = ".".join(str(part) for part in release[:3])
+        try:
+            applies = marker.evaluate(
+                {
+                    "python_version": python_version,
+                    "python_full_version": python_full_version,
+                    "extra": "",
+                }
+            )
+        except Exception:
+            return None
+        if not applies:
+            return False
+    return True
+
+
+def _pin_location(pin: DependencyPin) -> str:
+    if pin.file and pin.line is not None:
+        return f"{pin.file}:{pin.line}"
+    return pin.file or "unknown location"
+
+
+def _dependency_conflict_verdict(
+    bump: Bump,
+    api: ApiDiffResult,
+    usage: UsageResult | None,
+    context: DependencyConflictContext | None,
+    warnings: list[str] | None,
+) -> BumpVerdict | None:
+    if context is None:
+        return None
+    if not context.new_requires_dist:
+        if api.new_requires_python_state == "unavailable":
+            _warn(
+                warnings,
+                "R10: new package metadata is unavailable; dependency conflicts were not checked",
+            )
+        return None
+
+    pins_by_package: dict[str, list[DependencyPin]] = {}
+    for pin in context.pins:
+        pins_by_package.setdefault(pin.package, []).append(pin)
+
+    conflicts: list[tuple[str, DependencyPin]] = []
+    for raw in sorted(set(context.new_requires_dist)):
+        try:
+            requirement = Requirement(raw)
+        except InvalidRequirement:
+            _warn(warnings, f"R10: could not parse new requirement {raw!r}; skipping it")
+            continue
+        target = canonicalize_name(requirement.name)
+        if target == bump.package or target not in pins_by_package:
+            continue
+        marker_status = _marker_applies(requirement.marker, context.project)
+        if marker_status is not True:
+            detail = "unknown project Python set" if marker_status is None else "marker is not true"
+            _warn(warnings, f"R10: skipped {raw!r} because its {detail}; target={target}")
+            continue
+        required_extras = tuple(sorted(canonicalize_name(extra) for extra in requirement.extras))
+        if not requirement.specifier:
+            continue
+        target_pins = pins_by_package[target]
+        if len({pin.version for pin in target_pins}) > 1:
+            _warn(warnings, f"R10: target={target} has multiple pinned versions; skipping it")
+            continue
+        for pin in target_pins:
+            if required_extras and not set(required_extras).issubset(pin.extras):
+                _warn(
+                    warnings,
+                    f"R10: skipped {raw!r} because extras {', '.join(required_extras)} "
+                    f"are not pinned for {target} at {_pin_location(pin)}",
+                )
+                continue
+            if pin.version is None:
+                _warn(
+                    warnings,
+                    f"R10: target={target} at {_pin_location(pin)} "
+                    "is not an exact pin; skipping it",
+                )
+                continue
+            try:
+                pinned_version = Version(pin.version)
+                satisfies = pinned_version in requirement.specifier
+            except (InvalidVersion, ValueError):
+                _warn(
+                    warnings,
+                    f"R10: could not evaluate {raw!r} against {target}=={pin.version}; skipping it",
+                )
+                continue
+            if not satisfies:
+                conflicts.append((raw, pin))
+
+    if not conflicts:
+        return None
+    evidence = tuple(
+        Evidence(
+            kind="reason",
+            summary=(
+                f"new requirement {raw!r} conflicts with "
+                f"{pin.package}=={pin.version} pinned at {_pin_location(pin)}"
+            ),
+            file=pin.file,
+            line=pin.line,
+            symbol=pin.package,
+        )
+        for raw, pin in conflicts
+    )
+    rationale = "New dependency requirements conflict with pinned versions"
+    return _result(bump, api, usage, "LIKELY_BREAKING", "R10", rationale, evidence)
+
+
 def _finalize(
     result: BumpVerdict,
     bump: Bump,
     api: ApiDiffResult,
     usage: UsageResult | None,
     context: PythonSupportContext | None,
+    dependency_context: DependencyConflictContext | None = None,
+    warnings: list[str] | None = None,
 ) -> BumpVerdict:
     python_support = _python_support_verdict(bump, api, usage, context)
+    dependency = None
+    if result.rule_id != "R4":
+        dependency = _dependency_conflict_verdict(bump, api, usage, dependency_context, warnings)
     if result.verdict == "SAFE":
-        gates = [item for item in (python_support,) if item is not None]
+        gates = [item for item in (dependency, python_support) if item is not None]
         if result.rule_id == "R7":
             zero_scan = _zero_scan_verdict(bump, api, usage)
             if zero_scan is not None:
@@ -277,8 +422,9 @@ def _finalize(
         for gate in gates[1:]:
             combined = _merge_verdicts(combined, gate)
         return _merge_verdicts(result, combined)
-    if python_support is not None:
-        return _merge_verdicts(result, python_support)
+    for gate in (dependency, python_support):
+        if gate is not None:
+            result = _merge_verdicts(result, gate)
     return result
 
 
@@ -395,7 +541,17 @@ def decide(
     api: ApiDiffResult,
     usage: UsageResult | None,
     python_support: PythonSupportContext | None = None,
+    dependency_context: DependencyConflictContext | None = None,
+    warnings: list[str] | None = None,
 ) -> BumpVerdict:
-    """Decide the verdict for one bump, applying Python support and scan gates."""
+    """Decide the verdict for one bump, applying dependency, Python support and scan gates."""
     result = _decide_base(bump, api, usage)
-    return _finalize(result, bump, api, usage, python_support)
+    return _finalize(
+        result,
+        bump,
+        api,
+        usage,
+        python_support,
+        dependency_context,
+        warnings,
+    )

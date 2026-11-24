@@ -11,7 +11,7 @@ from typing import Any
 from packaging.version import InvalidVersion, Version
 
 from bumpcheck.baselines import semver_rule
-from bumpcheck.bench.eval import _label_records
+from bumpcheck.bench.eval import _label_records, correctness_flags
 from bumpcheck.bench.labels import load_candidates, load_labels
 from bumpcheck.verdict import Verdict
 
@@ -136,6 +136,24 @@ def _system_metrics(records: list[dict[str, Any]], system: str) -> list[tuple[st
             ),
         ),
     ]
+
+
+def _correctness_rows(records: list[dict[str, Any]]) -> list[list[str]]:
+    broke = [record for record in records if record.get("label") == "BROKE"]
+    ok = [record for record in records if record.get("label") == "OK"]
+    rows: list[list[str]] = []
+    for name, group, flag_index in (
+        ("verdict-correct (BROKE)", broke, 0),
+        ("reason-correct recall (BROKE)", broke, 1),
+        ("reason-correct rate (OK)", ok, 1),
+    ):
+        k = 0
+        for record in group:
+            flags = correctness_flags(record)
+            if flags[flag_index] is True:
+                k += 1
+        rows.append([name, format_rate(k, len(group))])
+    return rows
 
 
 def _table(headers: list[str], rows: list[list[str]]) -> str:
@@ -307,7 +325,8 @@ def render_report(
             "'Review major bumps, plus minor bumps while the major version is zero.' Old/new "
             "versions come from candidates.jsonl, falling back to stored result diagnostics; "
             "unavailable or invalid versions default to SAFE. Stored baseline verdicts in "
-            "results.jsonl are not used.",
+            "results.jsonl are not used. Reason-correct recall requires verdict_correct and "
+            "reason_correct on a BROKE result, matching its break_category to the fired rule.",
             "",
         ]
     )
@@ -322,6 +341,14 @@ def render_report(
     for index, name in enumerate(metric_names):
         rows.append([name, *[_system_metrics(selected, system)[index][1] for system in SYSTEMS]])
     lines.extend(["## Headline metrics", "", _table(["metric", *SYSTEMS], rows), ""])
+    lines.extend(
+        [
+            "## Verdict and reason correctness (BumpCheck)",
+            "",
+            _table(["metric", "rate"], _correctness_rows(selected)),
+            "",
+        ]
+    )
 
     lines.extend(
         [

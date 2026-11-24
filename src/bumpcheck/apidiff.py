@@ -11,6 +11,7 @@ import urllib.error
 import urllib.request
 import zipfile
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
@@ -118,6 +119,8 @@ class ApiDiffResult(BaseModel):
     new_requires_python: str | None = None
     old_requires_python_state: MetadataState = "available"
     new_requires_python_state: MetadataState = "available"
+    old_requires_dist: list[str] = Field(default_factory=list)
+    new_requires_dist: list[str] = Field(default_factory=list)
 
     @field_validator("package")
     @classmethod
@@ -239,7 +242,20 @@ def _metadata_path(cache_dir: Path, name: str, version: str) -> Path:
     return Path(cache_dir) / _METADATA_DIR / f"{canonicalize_name(name)}__{version}.json"
 
 
-def _read_metadata_sidecar(path: Path) -> tuple[str | None, MetadataState] | None:
+@dataclass(frozen=True)
+class _SidecarMetadata:
+    requires_python: str | None
+    requires_dist: tuple[str, ...]
+    state: MetadataState
+
+
+def _requires_dist_value(value: object) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        return ()
+    return tuple(item.strip() for item in value if isinstance(item, str) and item.strip())
+
+
+def _read_metadata_sidecar(path: Path) -> _SidecarMetadata | None:
     if not path.is_file():
         return None
     try:
@@ -249,9 +265,12 @@ def _read_metadata_sidecar(path: Path) -> tuple[str | None, MetadataState] | Non
     if not isinstance(payload, dict):
         return None
     value = payload.get("requires_python")
-    if isinstance(value, str) and value.strip():
-        return value.strip(), "available"
-    return None, "available"
+    requires_python = value.strip() if isinstance(value, str) and value.strip() else None
+    return _SidecarMetadata(
+        requires_python=requires_python,
+        requires_dist=_requires_dist_value(payload.get("requires_dist")),
+        state="available",
+    )
 
 
 def _write_metadata_sidecar(
@@ -259,11 +278,13 @@ def _write_metadata_sidecar(
     name: str,
     version: str,
     requires_python: str | None,
+    requires_dist: tuple[str, ...] = (),
 ) -> None:
     payload = {
         "package": canonicalize_name(name),
         "version": version,
         "requires_python": requires_python,
+        "requires_dist": list(requires_dist),
     }
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -283,6 +304,13 @@ def _requires_python_from_metadata(data: dict) -> str | None:
     return None
 
 
+def _requires_dist_from_metadata(data: dict) -> tuple[str, ...]:
+    info = data.get("info")
+    if not isinstance(info, dict):
+        return ()
+    return _requires_dist_value(info.get("requires_dist"))
+
+
 def _append_yanked_warning(
     data: dict,
     name: str,
@@ -300,10 +328,14 @@ def _fetch_metadata(
     fetcher: Fetcher,
     name: str,
     version: str,
-) -> tuple[dict, str | None]:
+) -> tuple[dict, str | None, tuple[str, ...]]:
     metadata_url = _PYPI_JSON_URL.format(name=name, version=version)
     data = _parse_metadata(_fetch_bytes(fetcher, metadata_url), name, version)
-    return data, _requires_python_from_metadata(data)
+    return (
+        data,
+        _requires_python_from_metadata(data),
+        _requires_dist_from_metadata(data),
+    )
 
 
 def get_unpacked(
@@ -312,28 +344,33 @@ def get_unpacked(
     cache_dir: Path,
     fetcher: Fetcher,
     warnings: list[str] | None = None,
-) -> tuple[Path, str | None, MetadataState]:
+) -> tuple[Path, str | None, tuple[str, ...], MetadataState]:
     """Download and unpack a wheel, returning its directory and metadata state."""
     target = Path(cache_dir) / canonicalize_name(name) / version
     metadata_file = _metadata_path(Path(cache_dir), name, version)
     cached_metadata = _read_metadata_sidecar(metadata_file)
     if target.is_dir() and any(target.iterdir()):
         if cached_metadata is not None:
-            return target, cached_metadata[0], cached_metadata[1]
+            return (
+                target,
+                cached_metadata.requires_python,
+                cached_metadata.requires_dist,
+                cached_metadata.state,
+            )
         try:
-            data, requires_python = _fetch_metadata(fetcher, name, version)
+            data, requires_python, requires_dist = _fetch_metadata(fetcher, name, version)
         except _ApiDiffError:
-            return target, None, "unavailable"
+            return target, None, (), "unavailable"
         _append_yanked_warning(data, name, version, warnings)
-        _write_metadata_sidecar(metadata_file, name, version, requires_python)
-        return target, requires_python, "available"
+        _write_metadata_sidecar(metadata_file, name, version, requires_python, requires_dist)
+        return target, requires_python, requires_dist, "available"
 
     parent = target.parent
     parent.mkdir(parents=True, exist_ok=True)
 
-    data, requires_python = _fetch_metadata(fetcher, name, version)
+    data, requires_python, requires_dist = _fetch_metadata(fetcher, name, version)
     _append_yanked_warning(data, name, version, warnings)
-    _write_metadata_sidecar(metadata_file, name, version, requires_python)
+    _write_metadata_sidecar(metadata_file, name, version, requires_python, requires_dist)
 
     entry = _choose_wheel(data.get("urls") or [], name, version)
     wheel_bytes = _fetch_bytes(fetcher, entry["url"])
@@ -345,7 +382,7 @@ def get_unpacked(
         raise _ApiDiffError("hash_mismatch", f"sha256 mismatch for {entry['filename']}")
 
     _unpack(wheel_bytes, target, parent, entry["filename"])
-    return target, requires_python, "available"
+    return target, requires_python, requires_dist, "available"
 
 
 def _read_wheel_name(unpacked_dir: Path) -> str | None:
@@ -579,6 +616,8 @@ def _failure(
     new_requires_python: str | None = None,
     old_requires_python_state: MetadataState = "available",
     new_requires_python_state: MetadataState = "available",
+    old_requires_dist: tuple[str, ...] = (),
+    new_requires_dist: tuple[str, ...] = (),
 ) -> ApiDiffResult:
     extra = [f"{error.reason}: {error.message}"] if error.message else []
     return ApiDiffResult(
@@ -597,6 +636,8 @@ def _failure(
         new_requires_python=new_requires_python,
         old_requires_python_state=old_requires_python_state,
         new_requires_python_state=new_requires_python_state,
+        old_requires_dist=list(old_requires_dist),
+        new_requires_dist=list(new_requires_dist),
     )
 
 
@@ -614,7 +655,7 @@ def diff_versions(
     warnings: list[str] = []
 
     try:
-        old_dir, old_requires_python, old_state = get_unpacked(
+        old_dir, old_requires_python, old_requires_dist, old_state = get_unpacked(
             name, old_version, cache, fetcher, warnings
         )
     except _ApiDiffError as exc:
@@ -622,7 +663,7 @@ def diff_versions(
     old_wheel = _read_wheel_name(old_dir)
 
     try:
-        new_dir, new_requires_python, new_state = get_unpacked(
+        new_dir, new_requires_python, new_requires_dist, new_state = get_unpacked(
             name, new_version, cache, fetcher, warnings
         )
     except _ApiDiffError as exc:
@@ -635,6 +676,7 @@ def diff_versions(
             old_wheel=old_wheel,
             old_requires_python=old_requires_python,
             old_requires_python_state=old_state,
+            old_requires_dist=old_requires_dist,
         )
     new_wheel = _read_wheel_name(new_dir)
     metadata_kwargs = {
@@ -642,6 +684,8 @@ def diff_versions(
         "new_requires_python": new_requires_python,
         "old_requires_python_state": old_state,
         "new_requires_python_state": new_state,
+        "old_requires_dist": old_requires_dist,
+        "new_requires_dist": new_requires_dist,
     }
 
     if not _has_python(old_dir) or not _has_python(new_dir):

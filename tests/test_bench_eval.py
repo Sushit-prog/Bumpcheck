@@ -446,6 +446,42 @@ def test_eval_recomputes_records_with_stale_results_schema_version(tmp_path: Pat
     assert records[0]["results_schema_version"] == bench_eval.RESULTS_SCHEMA_VERSION
 
 
+def test_eval_stores_verdict_and_reason_correctness(tmp_path: Path) -> None:
+    write_case(tmp_path)
+    fingerprint = {"id": "fp1"}
+
+    def runner(payload: dict, timeout: float) -> dict:
+        payload_result = result_payload("LIKELY_BREAKING")
+        payload_result["fired_rule_ids"] = {"bumpcheck": ["R4"]}
+        return payload_result
+
+    records = bench_eval.evaluate(tmp_path, fingerprint=fingerprint, runner=runner)
+
+    assert records[0]["verdict_correct"] is True
+    assert records[0]["reason_correct"] is True
+    text = report.render_report(tmp_path, records, split="dev")
+    assert "| reason-correct recall (BROKE) | 1/1" in text
+
+
+def test_correctness_flags_use_break_category_mapping() -> None:
+    dependency = {
+        "label": "BROKE",
+        "break_category": "dependency_conflict",
+        "verdicts": {"bumpcheck": "LIKELY_BREAKING"},
+        "fired_rule_ids": {"bumpcheck": ["R10"]},
+    }
+    wrong_reason = {**dependency, "fired_rule_ids": {"bumpcheck": ["R5"]}}
+    ok = {
+        "label": "OK",
+        "verdicts": {"bumpcheck": "SAFE"},
+        "fired_rule_ids": {"bumpcheck": ["R7"]},
+    }
+
+    assert bench_eval.correctness_flags(dependency) == (True, True)
+    assert bench_eval.correctness_flags(wrong_reason) == (True, False)
+    assert bench_eval.correctness_flags(ok) == (True, True)
+
+
 def test_worker_persists_per_bump_diagnostics(tmp_path: Path, monkeypatch) -> None:
     root = snapshot_root(tmp_path)
     change = ApiChange(

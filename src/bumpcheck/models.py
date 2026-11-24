@@ -45,6 +45,42 @@ class Bump(BaseModel):
         return self
 
 
+class DependencyPin(BaseModel):
+    """A pinned dependency preserved with its source location and original requirement."""
+
+    model_config = ConfigDict(frozen=True)
+
+    package: str
+    version: str | None = None
+    source: LockSource
+    specifier: str | None = None
+    raw: str | None = None
+    extras: tuple[str, ...] = ()
+    marker: str | None = None
+    file: str | None = None
+    line: int | None = None
+
+    @field_validator("package")
+    @classmethod
+    def _canonicalize_package(cls, value: str) -> str:
+        return canonicalize_name(value)
+
+    @field_validator("extras")
+    @classmethod
+    def _canonicalize_extras(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        return tuple(sorted({canonicalize_name(item) for item in value}))
+
+    @model_validator(mode="after")
+    def _validate_version(self) -> DependencyPin:
+        if self.version is None:
+            return self
+        try:
+            Version(self.version)
+        except InvalidVersion as exc:
+            raise ValueError(f"Invalid version: {self.version!r}") from exc
+        return self
+
+
 class Unresolved(BaseModel):
     """A package that resolves to multiple versions and cannot be compared."""
 
@@ -73,8 +109,24 @@ class ParseResult(BaseModel):
     bumps: list[Bump]
     warnings: list[str]
     unresolved: list[Unresolved] = Field(default_factory=list)
+    new_pins: tuple[DependencyPin, ...] = ()
 
     @field_validator("unresolved")
     @classmethod
     def _sort_unresolved(cls, value: list[Unresolved]) -> list[Unresolved]:
         return sorted(value, key=lambda item: item.package)
+
+    @field_validator("new_pins")
+    @classmethod
+    def _sort_pins(cls, value: tuple[DependencyPin, ...]) -> tuple[DependencyPin, ...]:
+        return tuple(
+            sorted(
+                value,
+                key=lambda item: (
+                    item.package,
+                    item.version or "",
+                    item.file or "",
+                    item.line or 0,
+                ),
+            )
+        )

@@ -66,6 +66,31 @@ def capture_usage(target: dict[str, UsageResult | None]):
     return capture
 
 
+def dependency_api(*requirements: str) -> ApiDiffResult:
+    api = api_diff("idna_removed_label")
+    return api.model_copy(update={"new_requires_dist": list(requirements)})
+
+
+def run_dependency_check(
+    repo: Path,
+    api: ApiDiffResult,
+    old_text: str,
+    new_text: str,
+    kind: str = "uv.lock",
+    *,
+    project: ProjectPythonSet | None = None,
+):
+    return check(
+        repo,
+        old_text,
+        new_text,
+        kind,
+        diff_fn=lambda *_args, **_kwargs: api,
+        project_python_fn=lambda _: project or ProjectPythonSet(source="unknown", status="unknown"),
+        new_lock_path=Path("new.lock"),
+    )
+
+
 def test_idna_removed_label_is_r4_likely_breaking_with_exact_keyword() -> None:
     api = api_diff("idna_removed_label")
     repo = FIXTURES / "idna_removed_label" / "repo"
@@ -217,6 +242,114 @@ def test_no_api_diff_is_r1_unknown(tmp_path: Path) -> None:
     assert bump.api_status == "no_api_diff"
     assert "no_wheel" in bump.rationale
     assert captured["usage"] is None
+
+
+def test_r10_overrides_r5_for_dependency_conflict(tmp_path: Path) -> None:
+    repo = source_repo(
+        tmp_path,
+        'from idna.core import valid_string_length\n\nvalid_string_length("example.com", 1)\n',
+    )
+    api = dependency_api("werkzeug>=3.1.0")
+    old = uv_lock(("idna", "3.11"), ("werkzeug", "2.0.3"))
+    new = uv_lock(("idna", "3.15"), ("werkzeug", "2.0.3"))
+
+    result = run_dependency_check(repo, api, old, new)
+    bump = result.bumps[0]
+
+    assert result.overall == "LIKELY_BREAKING"
+    assert bump.verdict == "LIKELY_BREAKING"
+    assert bump.rule_id == "R10"
+    assert any(evidence.file == "new.lock" and evidence.line == 7 for evidence in bump.evidence)
+    assert any("werkzeug>=3.1.0" in evidence.summary for evidence in bump.evidence)
+
+
+def test_r4_takes_precedence_over_r10(tmp_path: Path) -> None:
+    repo = source_repo(
+        tmp_path,
+        "from idna.core import valid_string_length\n"
+        '\nvalid_string_length("example.com", label=1)\n',
+    )
+    api = dependency_api("werkzeug>=3.1.0")
+    old = uv_lock(("idna", "3.11"), ("werkzeug", "2.0.3"))
+    new = uv_lock(("idna", "3.15"), ("werkzeug", "2.0.3"))
+
+    result = run_dependency_check(repo, api, old, new)
+
+    assert result.overall == "LIKELY_BREAKING"
+    assert result.bumps[0].rule_id == "R4"
+
+
+def test_r10_does_not_fire_when_pin_satisfies_requirement(tmp_path: Path) -> None:
+    repo = source_repo(tmp_path, "value = 1\n")
+    api = dependency_api("werkzeug>=3.1.0")
+    old = uv_lock(("idna", "3.11"), ("werkzeug", "3.1.1"))
+    new = uv_lock(("idna", "3.15"), ("werkzeug", "3.1.1"))
+
+    result = run_dependency_check(repo, api, old, new)
+
+    assert result.overall == "SAFE"
+    assert result.bumps[0].rule_id == "R7"
+    assert not any("R10" in warning for warning in result.warnings)
+
+
+def test_r10_warns_and_skips_non_exact_pin(tmp_path: Path) -> None:
+    repo = source_repo(tmp_path, "value = 1\n")
+    api = dependency_api("werkzeug>=3.1.0")
+    old = "idna==3.11\nwerkzeug>=2.0\n"
+    new = "idna==3.15\nwerkzeug>=2.0\n"
+
+    result = run_dependency_check(repo, api, old, new, "requirements")
+
+    assert result.overall == "SAFE"
+    assert result.bumps[0].rule_id == "R7"
+    assert any(
+        "target=werkzeug" in warning and "not an exact pin" in warning
+        for warning in result.warnings
+    )
+
+
+def test_r10_skips_marker_not_true_for_project(tmp_path: Path) -> None:
+    repo = source_repo(tmp_path, "value = 1\n")
+    api = dependency_api('werkzeug>=3.1.0; python_version >= "3.12"')
+    project = ProjectPythonSet(
+        source="ci_matrix",
+        status="explicit",
+        versions=("3.11",),
+    )
+    old = uv_lock(("idna", "3.11"), ("werkzeug", "2.0.3"))
+    new = uv_lock(("idna", "3.15"), ("werkzeug", "2.0.3"))
+
+    result = run_dependency_check(repo, api, old, new, project=project)
+
+    assert result.overall == "SAFE"
+    assert result.bumps[0].rule_id == "R7"
+    assert any("marker is not true" in warning for warning in result.warnings)
+
+
+def test_r10_warns_on_unparseable_requirement(tmp_path: Path) -> None:
+    repo = source_repo(tmp_path, "value = 1\n")
+    api = dependency_api("werkzeug >>>= 3")
+    old = uv_lock(("idna", "3.11"), ("werkzeug", "2.0.3"))
+    new = uv_lock(("idna", "3.15"), ("werkzeug", "2.0.3"))
+
+    result = run_dependency_check(repo, api, old, new)
+
+    assert result.overall == "SAFE"
+    assert result.bumps[0].rule_id == "R7"
+    assert any("could not parse new requirement" in warning for warning in result.warnings)
+
+
+def test_r10_skips_unknown_extras(tmp_path: Path) -> None:
+    repo = source_repo(tmp_path, "value = 1\n")
+    api = dependency_api("werkzeug[socks]>=3.1.0")
+    old = uv_lock(("idna", "3.11"), ("werkzeug", "2.0.3"))
+    new = uv_lock(("idna", "3.15"), ("werkzeug", "2.0.3"))
+
+    result = run_dependency_check(repo, api, old, new)
+
+    assert result.overall == "SAFE"
+    assert result.bumps[0].rule_id == "R7"
+    assert any("extras socks" in warning for warning in result.warnings)
 
 
 def test_cli_idna_check_fail_on_likely_breaking(
